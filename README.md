@@ -67,7 +67,6 @@ Build dependencies
   - compiler with C++17 support
   - cmake>=3.12
   - libboost>=1.74
-  - libglog>=0.7 (optional)
   - libleveldb
   - libmarisa
   - libyaml-cpp>=0.5
@@ -76,7 +75,6 @@ Build dependencies
 Runtime dependencies
 ---
   - libboost
-  - libglog (optional)
   - libleveldb
   - libmarisa
   - libyaml-cpp
@@ -148,7 +146,8 @@ Credits
 We are grateful to the makers of the following open source libraries:
 
   - [Boost C++ Libraries](http://www.boost.org/) (Boost Software License)
-  - [google-glog](https://github.com/google/glog) (The 3-Clause BSD License)
+  - [spdlog](https://github.com/gabime/spdlog) (MIT License)
+  - [fmt](https://github.com/fmtlib/fmt) (MIT License)
   - [Google Test](https://github.com/google/googletest) (The 3-Clause BSD License)
   - [LevelDB](https://github.com/google/leveldb) (The 3-Clause BSD License)
   - [marisa-trie](https://github.com/s-yata/marisa-trie) (BSD 2-Clause License, LGPL 2.1)
