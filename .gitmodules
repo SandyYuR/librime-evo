@@ -13,3 +13,6 @@
 [submodule "marisa-trie"]
 	path = deps/marisa-trie
 	url = https://github.com/s-yata/marisa-trie.git
+[submodule "deps/spdlog"]
+	path = deps/spdlog
+	url = https://github.com/gabime/spdlog.git
