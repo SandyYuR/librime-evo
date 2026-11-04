@@ -65,17 +65,10 @@ void UserDbRecoveryTask::RestoreUserDataFromSnapshot(Deployer* deployer) {
   boost::erase_last(dict_name, component->extension());
   // locate snapshot file
   const path& dir(deployer->user_data_sync_dir());
-  // try *.userdb.txt
+  // UniformRestore validates the snapshot before applying any records.
   path snapshot_path = dir / (dict_name + UserDb::snapshot_extension());
-  if (!std::filesystem::exists(snapshot_path)) {
-    // try *.userdb.*.snapshot
-    string legacy_snapshot_file =
-        dict_name + component->extension() + ".snapshot";
-    snapshot_path = dir / legacy_snapshot_file;
-    if (!std::filesystem::exists(snapshot_path)) {
-      return;  // not found
-    }
-  }
+  if (!std::filesystem::exists(snapshot_path))
+    return;
   LOG(INFO) << "snapshot exists, trying to restore db '" << dict_name << "'.";
   if (db_->Restore(snapshot_path)) {
     LOG(INFO) << "restored db '" << dict_name << "' from snapshot.";

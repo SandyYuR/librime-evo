@@ -8,6 +8,7 @@
 #include <unordered_set>
 
 #include <rime/config.h>
+#include <rime/path_resolver.h>
 
 namespace rime {
 namespace {
@@ -35,13 +36,7 @@ void ReadStringList(Config* config, const string& key, vector<string>* values) {
 }
 
 bool IsSimpleFileName(const string& file_name) {
-  if (file_name.empty()) {
-    return false;
-  }
-  const path file_path(file_name);
-  return !file_path.is_absolute() && !file_path.has_root_name() &&
-         !file_path.has_root_directory() && !file_path.has_parent_path() &&
-         file_path.filename().string() == file_name;
+  return safe_path::ValidRelativeName(file_name, false);
 }
 
 }  // namespace
@@ -69,8 +64,9 @@ bool RewritePresetCatalog::Load() {
     return false;
   }
 
-  const path preset_path = impl_->canonical_root / "presets.yaml";
-  if (!fs::is_regular_file(preset_path, ec) || ec) {
+  const path preset_path =
+      safe_path::ExistingFile(impl_->canonical_root, "presets.yaml");
+  if (preset_path.empty()) {
     LOG(ERROR) << "rewrite preset file '" << preset_path << "' is missing.";
     return false;
   }
@@ -134,12 +130,12 @@ bool RewritePresetCatalog::Resolve(const string& preset_name,
         continue;
       }
 
-      const path file_path = impl_->canonical_root / file_name;
-      const path canonical_file = fs::canonical(file_path, ec);
-      if (ec || !fs::is_regular_file(canonical_file, ec) || ec ||
+      const path canonical_file =
+          safe_path::ExistingFile(impl_->canonical_root, file_name);
+      if (canonical_file.empty() ||
           canonical_file.parent_path() != impl_->canonical_root) {
-        LOG(ERROR) << "rewrite preset source '" << file_path
-                   << "' is not available.";
+        LOG(ERROR) << "rewrite preset source '" << file_name
+                   << "' is missing or outside its preset directory.";
         return false;
       }
       stage.files.push_back(canonical_file);

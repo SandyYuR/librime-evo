@@ -193,8 +193,7 @@ static Bool rime_levers_set_hotkeys(RimeSwitcherSettings* settings,
 static Bool rime_levers_user_dict_iterator_init(RimeUserDictIterator* iter) {
   UserDictManager mgr(&Service::instance().deployer());
   UserDictList* list = new UserDictList;
-  mgr.GetUserDictList(list);
-  if (list->empty()) {
+  if (!mgr.GetUserDictList(list) || list->empty()) {
     delete list;
     return False;
   }

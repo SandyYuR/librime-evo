@@ -20,14 +20,13 @@ class RIME_DLL UserDictManager {
  public:
   UserDictManager(Deployer* deployer);
 
-  // If component is null, the current userdb component is used.
-  void GetUserDictList(UserDictList* user_dict_list,
+  // 从本地数据库目录重新发现用户词库；失败则返回 false。
+  bool GetUserDictList(UserDictList* user_dict_list,
                        UserDb::Component* component = nullptr);
 
   // CAVEAT: the user dict should be closed before the following operations
   bool Backup(const string& dict_name);
   bool Restore(const path& snapshot_file);
-  bool UpgradeUserDict(const string& dict_name);
   // returns num of exported entries, -1 denotes failure
   int Export(const string& dict_name, const path& text_file);
   // returns num of imported entries, -1 denotes failure
@@ -37,6 +36,10 @@ class RIME_DLL UserDictManager {
   bool SynchronizeAll();
 
  protected:
+  bool SynchronizeMerge(const string& name);
+  bool RestoreMerge(const path& snapshot_file,
+                    const string& name,
+                    size_t* source_records = nullptr);
   Deployer* deployer_;
   path path_;
   UserDb::Component* user_db_component_;

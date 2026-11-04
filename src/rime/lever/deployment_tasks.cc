@@ -27,6 +27,7 @@
 #include <rime/lever/deployment_tasks.h>
 #include <rime/lever/rewrite_compiler.h>
 #include <rime/lever/user_dict_manager.h>
+#include <rime/path_resolver.h>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -55,7 +56,8 @@ bool DetectModifications::Run(Deployer* deployer) {
           path entry(iter->path());
           if (fs::is_regular_file(fs::canonical(entry)) &&
               entry.extension().to_utf8_string() == ".yaml" &&
-              entry.filename().to_utf8_string() != "user.yaml") {
+              entry.filename().to_utf8_string() != "user.yaml" &&
+              entry.filename().to_utf8_string() != "sync.yaml") {
             last_modified =
                 (std::max)(last_modified,
                            filesystem::to_time_t(fs::last_write_time(entry)));
@@ -531,21 +533,10 @@ bool SymlinkingPrebuiltDictionaries::Run(Deployer* deployer) {
   return success;
 }
 
-bool UserDictUpgrade::Run(Deployer* deployer) {
-  LoadModules(kLegacyModules);
-  auto legacy_userdb_component = UserDb::Require("legacy_userdb");
-  if (!legacy_userdb_component) {
-    return true;  // nothing to upgrade
-  }
-  UserDictManager manager(deployer);
-  UserDictList dicts;
-  manager.GetUserDictList(&dicts, legacy_userdb_component);
-  bool ok = true;
-  for (auto it = dicts.cbegin(); it != dicts.cend(); ++it) {
-    if (!manager.UpgradeUserDict(*it))
-      ok = false;
-  }
-  return ok;
+bool UserDictUpgrade::Run(Deployer*) {
+  // EVO defines a single fresh UserDB format. The historical deployment task
+  // name remains registered, but no legacy DB conversion is performed.
+  return true;
 }
 
 bool UserDictSync::Run(Deployer* deployer) {
@@ -553,64 +544,104 @@ bool UserDictSync::Run(Deployer* deployer) {
   return mgr.SynchronizeAll();
 }
 
-static bool IsCustomizedCopy(const path& file_path) {
-  auto file_name = file_path.filename().to_utf8_string();
-  if (boost::ends_with(file_name, ".yaml") &&
-      !boost::ends_with(file_name, ".custom.yaml")) {
-    Config config;
-    string checksum;
-    if (config.LoadFromFile(file_path) &&
-        config.GetString("customization", &checksum)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 bool BackupConfigFiles::Run(Deployer* deployer) {
   if (!deployer->backup_config_files) {
     LOG(INFO) << "skip backing up config files because it's disabled.";
     return true;
   }
-  LOG(INFO) << "backing up config files.";
   const path user_data_path(deployer->user_data_dir);
-  if (!fs::exists(user_data_path))
-    return false;
-  path backup_dir(deployer->user_data_sync_dir());
-  if (!MaybeCreateDirectory(backup_dir)) {
+  std::error_code ec;
+  if (!fs::exists(user_data_path, ec) || ec) {
+    LOG(ERROR) << "config backup cannot access user data directory "
+               << user_data_path << (ec ? ": " + ec.message() : "");
     return false;
   }
+  const path device_dir(deployer->user_data_sync_dir());
+  if (!MaybeCreateDirectory(device_dir)) {
+    LOG(ERROR) << "config backup cannot create device directory: "
+               << device_dir;
+    return false;
+  }
+  const path backup_dir(device_dir / "backup");
+  std::error_code backup_error;
+  const auto backup_status = fs::symlink_status(backup_dir, backup_error);
+  if (backup_error != std::errc::no_such_file_or_directory &&
+      (backup_error || fs::is_symlink(backup_status))) {
+    LOG(ERROR) << "config backup rejected unsafe directory: " << backup_dir
+               << (backup_error ? ": " + backup_error.message() : "");
+    return false;
+  }
+  if (!MaybeCreateDirectory(backup_dir)) {
+    LOG(ERROR) << "config backup cannot create backup directory: "
+               << backup_dir;
+    return false;
+  }
+
   int success = 0, failure = 0, latest = 0, skipped = 0;
-  for (fs::directory_iterator iter(user_data_path), end; iter != end; ++iter) {
-    path entry(iter->path());
-    if (!fs::is_regular_file(entry))
-      continue;
-    auto file_extension = entry.extension().to_utf8_string();
-    bool is_yaml_file = file_extension == ".yaml";
-    bool is_text_file = file_extension == ".txt";
-    if (!is_yaml_file && !is_text_file)
-      continue;
-    path backup = backup_dir / entry.filename();
-    if (fs::exists(backup) && Checksum(backup) == Checksum(entry)) {
-      ++latest;  // already up-to-date
+  for (fs::directory_iterator iter(user_data_path, ec), end; !ec && iter != end;
+       iter.increment(ec)) {
+    const path entry(iter->path());
+    std::error_code entry_error;
+    const auto status = iter->symlink_status(entry_error);
+    if (entry_error) {
+      LOG(ERROR) << "config backup cannot inspect " << entry << ": "
+                 << entry_error.message();
+      ++failure;
       continue;
     }
-    if (is_yaml_file && IsCustomizedCopy(entry)) {
-      ++skipped;  // customized copy
+    if (fs::is_symlink(status) || !fs::is_regular_file(status))
+      continue;
+    if (entry.filename().to_utf8_string() == "sync.yaml") {
+      ++skipped;
       continue;
     }
-    std::error_code ec;
-    fs::copy_file(entry, backup, fs::copy_options::overwrite_existing, ec);
-    if (ec) {
-      LOG(ERROR) << "error backing up file " << backup;
+    const auto extension = entry.extension().to_utf8_string();
+    if (extension != ".yaml" && extension != ".txt")
+      continue;
+    const path backup = safe_path::WritableFile(
+        backup_dir, entry.filename().to_utf8_string(), false);
+    if (backup.empty()) {
+      LOG(ERROR) << "config backup rejected unsafe target: "
+                 << entry.filename();
+      ++failure;
+      continue;
+    }
+    std::error_code exists_error;
+    const bool backup_exists = fs::exists(backup, exists_error);
+    if (exists_error) {
+      LOG(ERROR) << "config backup cannot inspect existing file " << backup
+                 << ": " << exists_error.message();
+      ++failure;
+      continue;
+    }
+    if (backup_exists && Checksum(backup) == Checksum(entry)) {
+      ++latest;
+      continue;
+    }
+    std::error_code copy_error;
+    fs::copy_file(entry, backup, fs::copy_options::overwrite_existing,
+                  copy_error);
+    if (copy_error) {
+      LOG(ERROR) << "config backup failed: source=" << entry
+                 << " target=" << backup << " reason=" << copy_error.message();
       ++failure;
     } else {
       ++success;
     }
   }
-  LOG(INFO) << "backed up " << success << " config files to " << backup_dir
-            << ", " << failure << " failed, " << latest << " up-to-date, "
-            << skipped << " skipped.";
+  if (ec) {
+    LOG(ERROR) << "config backup cannot enumerate " << user_data_path << ": "
+               << ec.message();
+    ++failure;
+  }
+  if (failure)
+    LOG(ERROR) << "config backup failed: path=" << backup_dir
+               << " copied=" << success << " failed=" << failure
+               << " unchanged=" << latest << " skipped=" << skipped;
+  else
+    LOG(INFO) << "config backup finished: path=" << backup_dir
+              << " copied=" << success << " unchanged=" << latest
+              << " skipped=" << skipped;
   return !failure;
 }
 

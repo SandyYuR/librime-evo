@@ -171,6 +171,35 @@ void DictEntryIterator::Sort() {
                     dictionary::compare_chunk_by_head_element);
 }
 
+std::map<Code, double> DictEntryIterator::TopWeightsByCode(
+    bool separate_readings) const {
+  std::map<Code, double> result;
+  constexpr double kLogScale = 18.420680743952367;
+  const auto& chunks = query_result_->chunks;
+  for (size_t index = chunk_index_; index < chunks.size(); ++index) {
+    const auto& c = chunks[index];
+    if (!c.entries || c.cursor >= c.size || !c.is_exact_match() ||
+        !c.remaining_code.empty())
+      continue;
+    const Code key = separate_readings ? c.code : Code{};
+    const double value = c.entries[c.cursor].weight - kLogScale + c.credibility;
+    auto it = result.find(key);
+    if (it == result.end())
+      result[key] = value;
+    else
+      it->second = (std::max)(it->second, value);
+  }
+  return result;
+}
+
+DictEntryIterator DictEntryIterator::Fork() const {
+  DictEntryIterator copy(*this);
+  // The implicit copy shares QueryResult and would mutate live chunk cursors.
+  copy.query_result_ = New<dictionary::QueryResult>(*query_result_);
+  copy.entry_.reset();
+  return copy;
+}
+
 void DictEntryIterator::AddFilter(DictEntryFilter filter) {
   DictEntryFilterBinder::AddFilter(filter);
   // the introduced filter could invalidate the current or even all the

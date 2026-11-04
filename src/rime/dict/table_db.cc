@@ -29,7 +29,7 @@ static bool rime_table_entry_parser(const Tsv& row,
     try {
       v.commits = std::stoi(row[2]);
       const double kS = 1e8;
-      v.dee = (v.commits + 1) / kS;
+      v.dynamic = (v.commits + 1) / kS;
     } catch (...) {
     }
   }
@@ -45,7 +45,9 @@ static bool rime_table_entry_formatter(const string& key,
   boost::algorithm::split(row, key, boost::algorithm::is_any_of("\t"));
   if (row.size() != 2 || row[0].empty() || row[1].empty())
     return false;
-  UserDbValue v(value);
+  UserDbValue v;
+  if (!v.Unpack(value))
+    return false;
   if (v.commits < 0)  // deleted entry
     return false;
   boost::algorithm::trim(row[0]);  // remove trailing space

@@ -82,6 +82,7 @@ class TableTranslation : public Translation {
   string preedit_;
   DictEntryIterator iter_;
   UserDictEntryIterator uter_;
+  size_t emitted_position_ = 0;
 };
 
 }  // namespace rime

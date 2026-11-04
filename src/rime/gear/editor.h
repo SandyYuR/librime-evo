@@ -35,6 +35,12 @@ class Editor : public Processor, public KeyBindingProcessor<Editor> {
   Handler BackToPreviousInput;
   Handler BackToPreviousSyllable;
   Handler DeleteCandidate;
+  // Editor actions: manual_up/manual_down, auto_delete/manual_delete.
+  // Keep declarations here in sync with editor.cc and editor/bindings.
+  Handler ManualUp;
+  Handler ManualDown;
+  Handler AutoDel;
+  Handler ManualDel;
   Handler DeleteChar;
   Handler CancelComposition;
 

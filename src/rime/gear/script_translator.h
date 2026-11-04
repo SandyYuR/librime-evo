@@ -38,6 +38,7 @@ class ScriptTranslator : public Translator,
   virtual bool Memorize(const CommitEntry& commit_entry) override;
   virtual bool ProcessSegmentOnCommit(CommitEntry& commit_entry,
                                       const Segment& seg) override;
+  bool FlushPendingCommit(CommitEntry& commit_entry) override;
 
   string FormatPreedit(const string& preedit);
   string Spell(const Code& code);

@@ -5,12 +5,15 @@
 // 2011-10-23 GONG Chen <chen.sst@gmail.com>
 //
 #include <rime/common.h>
+#include <rime/candidate.h>
+#include <rime/composition.h>
 #include <rime/config.h>
 #include <rime/context.h>
 #include <rime/engine.h>
 #include <rime/schema.h>
 #include <rime/key_table.h>
 #include <rime/gear/editor.h>
+#include <rime/gear/user_rank_actions.h>
 #include <rime/gear/key_binding_processor.h>
 #include <rime/gear/translator_commons.h>
 
@@ -27,6 +30,10 @@ static Editor::ActionDef editor_action_definitions[] = {
     {"back", &Editor::BackToPreviousInput},
     {"back_syllable", &Editor::BackToPreviousSyllable},
     {"delete_candidate", &Editor::DeleteCandidate},
+    {"manual_up", &Editor::ManualUp},
+    {"manual_down", &Editor::ManualDown},
+    {"auto_delete", &Editor::AutoDel},
+    {"manual_delete", &Editor::ManualDel},
     {"delete", &Editor::DeleteChar},
     {"cancel", &Editor::CancelComposition},
     Editor::kActionNoop};
@@ -49,8 +56,12 @@ ProcessResult Editor::ProcessKeyEvent(const KeyEvent& key_event) {
   int ch = key_event.keycode();
   Context* ctx = engine_->context();
   if (ctx->IsComposing()) {
-    auto result = KeyBindingProcessor::ProcessKeyEvent(key_event, ctx, 0,
-                                                       FallbackOptions::All);
+    // Shift+上下用于音节导航，Ctrl+上下用于手排。
+    const int fallback = (ch == XK_Up || ch == XK_Down)
+                             ? FallbackOptions::IgnoreShift
+                             : FallbackOptions::All;
+    auto result =
+        KeyBindingProcessor::ProcessKeyEvent(key_event, ctx, 0, fallback);
     if (result != kNoop) {
       return result;
     }
@@ -159,6 +170,27 @@ bool Editor::BackToPreviousSyllable(Context* ctx) {
   return true;
 }
 
+// Editor 处理快捷键，词典层负责写入。
+bool Editor::ManualUp(Context* ctx) {
+  return user_rank::ApplyEditAction(engine_, ctx,
+                                    user_rank::EditAction::kMoveUp);
+}
+
+bool Editor::ManualDown(Context* ctx) {
+  return user_rank::ApplyEditAction(engine_, ctx,
+                                    user_rank::EditAction::kMoveDown);
+}
+
+bool Editor::AutoDel(Context* ctx) {
+  return user_rank::ApplyEditAction(engine_, ctx,
+                                    user_rank::EditAction::kResetAuto);
+}
+
+bool Editor::ManualDel(Context* ctx) {
+  return user_rank::ApplyEditAction(engine_, ctx,
+                                    user_rank::EditAction::kResetManual);
+}
+
 bool Editor::DeleteCandidate(Context* ctx) {
   ctx->DeleteCurrentSelection();
   return true;
@@ -196,7 +228,12 @@ FluidEditor::FluidEditor(const Ticket& ticket) : Editor(ticket, false) {
   keymap.Bind({XK_Return, kShiftMask}, &Editor::CommitScriptText);  //
   keymap.Bind({XK_Return, kControlMask | kShiftMask}, &Editor::CommitComment);
   keymap.Bind({XK_Delete, 0}, &Editor::DeleteChar);
-  keymap.Bind({XK_Delete, kControlMask}, &Editor::DeleteCandidate);
+  // Ctrl+Delete 清除自动学习，Shift+Delete 清除手排。
+  keymap.Bind({XK_Delete, kControlMask}, &Editor::AutoDel);
+  keymap.Bind({XK_Delete, kShiftMask}, &Editor::ManualDel);
+  // Ctrl+上下移动候选，Shift+上下保留导航功能。
+  keymap.Bind({XK_Up, kControlMask}, &Editor::ManualUp);
+  keymap.Bind({XK_Down, kControlMask}, &Editor::ManualDown);
   keymap.Bind({XK_Escape, 0}, &Editor::CancelComposition);
   char_handler_ = &Editor::AddToInput;  //
   LoadConfig();
@@ -211,7 +248,12 @@ ExpressEditor::ExpressEditor(const Ticket& ticket) : Editor(ticket, true) {
   keymap.Bind({XK_Return, kControlMask}, &Editor::CommitScriptText);  //
   keymap.Bind({XK_Return, kControlMask | kShiftMask}, &Editor::CommitComment);
   keymap.Bind({XK_Delete, 0}, &Editor::DeleteChar);
-  keymap.Bind({XK_Delete, kControlMask}, &Editor::DeleteCandidate);
+  // Ctrl+Delete 清除自动学习，Shift+Delete 清除手排。
+  keymap.Bind({XK_Delete, kControlMask}, &Editor::AutoDel);
+  keymap.Bind({XK_Delete, kShiftMask}, &Editor::ManualDel);
+  // Ctrl+上下移动候选，Shift+上下保留导航功能。
+  keymap.Bind({XK_Up, kControlMask}, &Editor::ManualUp);
+  keymap.Bind({XK_Down, kControlMask}, &Editor::ManualDown);
   keymap.Bind({XK_Escape, 0}, &Editor::CancelComposition);
   char_handler_ = &Editor::DirectCommit;  //
   LoadConfig();

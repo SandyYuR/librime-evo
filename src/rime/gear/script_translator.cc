@@ -30,6 +30,7 @@
 #include <rime/gear/auxiliary_matcher.h>
 #include <rime/gear/script_translator.h>
 #include <rime/gear/translator_commons.h>
+#include <rime/gear/user_rank.h>
 
 namespace rime {
 
@@ -298,7 +299,7 @@ an<Translation> ScriptTranslator::Query(const string& input,
       auxiliary_algebra_->Apply(&auxiliary_suffix);
   }
 
-  bool enable_user_dict =
+  bool user_dict_available =
       user_dict_ && user_dict_->loaded() && !IsUserDictDisabledFor(input);
 
   size_t end_of_input = auxiliary_suffix.empty()
@@ -308,11 +309,13 @@ an<Translation> ScriptTranslator::Query(const string& input,
   auto result = New<ScriptTranslation>(
       this, corrector_.get(), poet_.get(), input, segment.start, end_of_input,
       max_sentences_, sentence_cutoff_threshold_, auxiliary_suffix);
-  if (!result || !result->Evaluate(
-                     dict_.get(), enable_user_dict ? user_dict_.get() : NULL)) {
+  if (!result ||
+      !result->Evaluate(dict_.get(),
+                        user_dict_available ? user_dict_.get() : NULL)) {
     return nullptr;
   }
-  auto deduped = New<DistinctTranslation>(result);
+  // 手排权重已在词库查询阶段计算。
+  an<Translation> deduped = New<DistinctTranslation>(result);
   if (contextual_suggestions_) {
     return poet_->ContextualWeighted(deduped, input, segment.start, this);
   }
@@ -339,12 +342,13 @@ static bool exceed_upperlimit(int length, int upper_limit) {
 }
 
 bool ScriptTranslator::SaveCommitEntry(CommitEntry& commit_entry) {
-  if (exceed_upperlimit(commit_entry.Length(), max_word_length())) {
-    UpdateElements(commit_entry);
-  } else {
-    commit_entry.Save();
-  }
-  return true;
+  if (commit_entry.empty())
+    return true;
+  if (!StartSession())
+    return false;
+  if (exceed_upperlimit(commit_entry.Length(), max_word_length()))
+    return UpdateElements(commit_entry);
+  return commit_entry.Save();
 }
 
 bool ScriptTranslator::ConcatenatePhrases(CommitEntry& commit_entry,
@@ -357,39 +361,41 @@ bool ScriptTranslator::ConcatenatePhrases(CommitEntry& commit_entry,
     for (; j < n; ++j) {
       commit_entry.AppendPhrase(phrases.at(j));
       cur_len += phrases.at(j)->code().size();
-      if (kCoreWordLength <= 0 || cur_len > kCoreWordLength) {
+      if (kCoreWordLength <= 0 || cur_len > kCoreWordLength)
         break;
-      }
-      SaveCommitEntry(commit_entry);
+      if (!SaveCommitEntry(commit_entry))
+        return false;
     }
     if (kCoreWordLength > 0) {
-      if (j == i) {
-        SaveCommitEntry(commit_entry);
-      }
+      if (j == i && !SaveCommitEntry(commit_entry))
+        return false;
       commit_entry.Clear();
     }
   }
-  SaveCommitEntry(commit_entry);
+  const bool ok = SaveCommitEntry(commit_entry);
   commit_entry.Clear();
-
-  return true;
+  return ok;
 }
 
 bool ScriptTranslator::ProcessSegmentOnCommit(CommitEntry& commit_entry,
                                               const Segment& seg) {
   auto phrase =
       As<Phrase>(Candidate::GetGenuineCandidate(seg.GetSelectedCandidate()));
-  bool recognized = Language::intelligible(phrase, this);
-  if (recognized) {
+  const bool recognized = OwnsPhrase(phrase);
+  if (recognized)
     queue_.push_back(phrase);
-  }
-
   if (!recognized || seg.status >= Segment::kConfirmed) {
-    ConcatenatePhrases(commit_entry, queue_);
+    if (!ConcatenatePhrases(commit_entry, queue_))
+      return false;
     queue_.clear();
   }
-
   return true;
+}
+
+bool ScriptTranslator::FlushPendingCommit(CommitEntry& commit_entry) {
+  const bool ok = ConcatenatePhrases(commit_entry, queue_);
+  queue_.clear();
+  return ok;
 }
 
 string ScriptTranslator::FormatPreedit(const string& preedit) {
@@ -428,16 +434,20 @@ bool ScriptTranslator::UpdateElements(const CommitEntry& commit_entry) {
   }
   if (update_elements) {
     for (const DictEntry* e : commit_entry.elements) {
-      user_dict_->UpdateEntry(*e, 0);
+      if (!user_dict_->UpdateEntry(*e, 0))
+        return false;
     }
   }
   return true;
 }
 
 bool ScriptTranslator::Memorize(const CommitEntry& commit_entry) {
-  UpdateElements(commit_entry);
-  user_dict_->UpdateEntry(commit_entry, 1);
-  return true;
+  if (!user_dict_)
+    return false;
+  if (!UpdateElements(commit_entry))
+    return false;
+  const bool written = user_dict_->UpdateEntry(commit_entry, 1);
+  return written;
 }
 
 // ScriptSyllabifier implementation
@@ -539,11 +549,16 @@ string ScriptSyllabifier::GetOriginalSpelling(const Phrase& cand) const {
 
 template <class Ptr, class Iter>
 static bool has_exact_match_phrase(Ptr ptr, Iter iter, size_t consumed) {
-  return ptr && iter->first == consumed && !iter->second.exhausted() &&
-         iter->second.Peek()->IsExactMatch();
+  // AUX 过滤后候选可能为空，不能直接取 rbegin()。
+  if (!ptr || iter == ptr->rend())
+    return false;
+  if (iter->first != consumed || iter->second.exhausted())
+    return false;
+  const auto entry = iter->second.Peek();
+  return entry && entry->IsExactMatch();
 }
 
-// Filter before both exact-phrase suppression and homophone truncation.
+// 同音截断前先应用 AUX 过滤。
 template <class Collector>
 static void FilterAuxiliaryEntries(const an<Collector>& collector,
                                    const SyllableGraph& graph,
@@ -584,6 +599,18 @@ static void FilterAuxiliarySuffixEntries(
   }
 }
 
+template <class Collector>
+static void RemoveExhaustedBuckets(const an<Collector>& collector) {
+  if (!collector)
+    return;
+  for (auto it = collector->begin(); it != collector->end();) {
+    if (it->second.exhausted())
+      it = collector->erase(it);
+    else
+      ++it;
+  }
+}
+
 // ScriptTranslation implementation
 
 bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
@@ -611,6 +638,22 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
     FilterAuxiliarySuffixEntries(user_phrase_, translator_->auxiliary_matcher(),
                                  auxiliary_suffix_);
   }
+  // AUX 过滤后再计算手排位置。
+  if (user_phrase_) {
+    for (auto& by_end : *user_phrase_) {
+      DictEntryIterator* sys = nullptr;
+      if (phrase_) {
+        auto found = phrase_->find(by_end.first);
+        if (found != phrase_->end())
+          sys = &found->second;
+      }
+      // 同一输入区间的不同读音共用可见候选绝对位置。
+      user_rank::Apply(sys, &by_end.second);
+    }
+  }
+  // 手排过滤只会耗尽桶内迭代器，不会删除外层编码桶；这里统一清理。
+  RemoveExhaustedBuckets(phrase_);
+  RemoveExhaustedBuckets(user_phrase_);
   if ((!phrase_ || phrase_->empty()) &&
       (!user_phrase_ || user_phrase_->empty()))
     return false;
@@ -623,7 +666,8 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
   auto is_correction_match = [&](auto& iter_pair, size_t len) {
     if (iter_pair.first != len || iter_pair.second.exhausted())
       return false;
-    return syllabifier_->IsCorrection(iter_pair.second.Peek()->code, len);
+    const auto entry = iter_pair.second.Peek();
+    return entry && syllabifier_->IsCorrection(entry->code, len);
   };
 
   bool has_reliable_phrase =
@@ -756,6 +800,11 @@ iter_incremented:
     candidate_ = sentences_[0];
     return true;
   }
+  if (CheckEmpty()) {
+    candidate_source_ = kUninitialized;
+    candidate_ = nullptr;
+    return false;
+  }
   const size_t full_code_length = end_of_input_ - start_;
   size_t user_phrase_code_length = 0;
   if (user_phrase_ && user_phrase_iter_ != user_phrase_->rend()) {
@@ -772,26 +821,38 @@ iter_incremented:
           [this, full_code_length, phrase_code_length]() {
             UserDictEntryIterator& uter = user_phrase_iter_->second;
             DictEntryIterator& iter = phrase_iter_->second;
+            const auto user_entry = uter.Peek();
+            const auto system_entry = iter.Peek();
+            if (!user_entry)
+              return false;
+            if (!system_entry)
+              return true;
             // 但若用戶詞爲糾錯結果, 則免去優先權, 回歸權重比較
             bool user_is_correction = syllabifier_->IsCorrection(
-                uter.Peek()->code, phrase_code_length);
+                user_entry->code, phrase_code_length);
             if (user_is_correction) {
               // 因對糾錯候選施加了較大懲罰, 通常結果爲 系統原文 > 用戶糾錯
               // 兩者皆糾錯時, 用戶詞的動態權重有助達成 用戶糾錯 > 系統糾錯
-              return uter.Peek()->weight >= iter.Peek()->weight;
+              return user_rank::PreferUser(*user_entry, *system_entry,
+                                           candidate_index_ + 1);
             }
             // 長詞聯想之前須至少出一個嚴格匹配的候選
             // 故確定首選之際, 系統嚴格匹配 > 用戶長詞聯想
             const int kNumExactMatchOnTop = 1;
-            return candidate_index_ >= kNumExactMatchOnTop ||
-                   prefer_user_phrase(
-                       has_exact_match_phrase(user_phrase_, user_phrase_iter_,
-                                              full_code_length),
-                       has_exact_match_phrase(phrase_, phrase_iter_,
-                                              full_code_length));
+            if (candidate_index_ < kNumExactMatchOnTop &&
+                !has_exact_match_phrase(user_phrase_, user_phrase_iter_,
+                                        full_code_length) &&
+                has_exact_match_phrase(phrase_, phrase_iter_, full_code_length))
+              return false;
+            return user_rank::PreferUser(*user_entry, *system_entry,
+                                         candidate_index_ + 1);
           })) {
     UserDictEntryIterator& uter = user_phrase_iter_->second;
-    const auto& entry = uter.Peek();
+    const auto entry = uter.Peek();
+    if (!entry) {
+      ++user_phrase_iter_;
+      goto iter_incremented;
+    }
     DLOG(INFO) << "user phrase '" << entry->text
                << "', code length: " << user_phrase_code_length;
     candidate_source_ = kUserPhrase;
@@ -805,11 +866,11 @@ iter_incremented:
     return true;
   } else if (phrase_code_length > 0) {
     DictEntryIterator& iter = phrase_iter_->second;
-    if (iter.exhausted()) {
+    const auto entry = iter.Peek();
+    if (!entry) {
       ++phrase_iter_;
       goto iter_incremented;
     }
-    const auto& entry = iter.Peek();
     DLOG(INFO) << "phrase '" << entry->text
                << "', code length: " << phrase_code_length;
     candidate_source_ = kSysPhrase;
@@ -864,17 +925,31 @@ WordGraph ScriptTranslation::PrepareForMakingSentence(
   WordGraph graph;
   for (const auto& x : syllable_graph.edges) {
     auto& same_start_pos = graph[x.first];
-    if (user_dict) {
-      EnrollEntries(same_start_pos,
-                    user_dict->Lookup(syllable_graph, x.first,
-                                      kMaxSyllablesForUserPhraseQuery),
-                    x.first);
+    auto user_results = user_dict
+                            ? user_dict->Lookup(syllable_graph, x.first,
+                                                kMaxSyllablesForUserPhraseQuery)
+                            : nullptr;
+    auto system_results =
+        dict->Lookup(syllable_graph, x.first, &translator_->blacklist());
+    // AUX 可能删除候选节点，必须先过滤再遍历。
+    if (syllabifier_->auxiliary_active()) {
+      FilterAuxiliaryEntries(user_results, syllable_graph, x.first);
+      FilterAuxiliaryEntries(system_results, syllable_graph, x.first);
     }
-    // merge lookup results
-    EnrollEntries(
-        same_start_pos,
-        dict->Lookup(syllable_graph, x.first, &translator_->blacklist()),
-        x.first);
+    if (user_results) {
+      for (auto& y : *user_results) {
+        DictEntryIterator* sys = nullptr;
+        if (system_results) {
+          auto found = system_results->find(y.first);
+          if (found != system_results->end())
+            sys = &found->second;
+        }
+        // 句子组合仍按读音隔离，避免手排跨读音影响 Poet 的路径评分。
+        user_rank::Apply(sys, &y.second, true);
+      }
+    }
+    EnrollEntries(same_start_pos, user_results, x.first);
+    EnrollEntries(same_start_pos, system_results, x.first);
   }
   return graph;
 }

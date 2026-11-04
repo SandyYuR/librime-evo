@@ -55,6 +55,10 @@ struct DictEntry {
   // 全碼匹配長度積分，記錄該詞條對應的路徑中，屬於「全拼」部分的字符總長度
   double quality_len = 0.0;
   int commit_count = 0;
+  // Only populated by UserDictionary. 0: no fixed position (including a
+  // versioned reset); positive: explicitly pinned. Not a weight bonus.
+  int manual_position = 0;
+  uint64_t manual_version = 0;  // v, for deterministic equal-slot tie
   int remaining_code_length = 0;
   int matching_code_size = 0;
 

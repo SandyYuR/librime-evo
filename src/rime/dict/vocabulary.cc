@@ -66,6 +66,18 @@ bool ShortDictEntry::operator<(const ShortDictEntry& other) const {
 }
 
 bool DictEntry::operator<(const DictEntry& other) const {
+  // The user dictionary must surface explicitly pinned records before the
+  // top-N presentation window. The common ranker applies the exact position;
+  // this comparison only gives it a chance to observe the record. For static
+  // entries, both fields are zero and the original weight ordering remains.
+  if (manual_position > 0 || other.manual_position > 0) {
+    if (manual_position <= 0)
+      return false;
+    if (other.manual_position <= 0)
+      return true;
+    if (manual_position != other.manual_position)
+      return manual_position < other.manual_position;
+  }
   // Sort different entries sharing the same code by weight desc.
   if (weight != other.weight)
     return weight > other.weight;

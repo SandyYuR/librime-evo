@@ -8,25 +8,59 @@
 #define RIME_USER_DB_H_
 
 #include <stdint.h>
+#include <map>
 #include <rime/component.h>
 #include <rime/dict/db.h>
 #include <rime/dict/db_utils.h>
 
 namespace rime {
 
+// 存储格式固定为 userdb-v1，未修改结构前不升级。
+inline constexpr char kUserDbFormat[] = "userdb-v1";
+
 using TickCount = uint64_t;
 
 /// Properties of a user db entry value.
 struct RIME_DLL UserDbValue {
   int commits = 0;
-  double dee = 0.0;
-  TickCount tick = 0;
+  double dynamic = 0.0;
+  TickCount last_tick = 0;
 
   UserDbValue() = default;
   UserDbValue(const string& value);
 
   string Pack() const;
   bool Unpack(const string& value);
+};
+
+// 五字段：commits,dynamic,last_tick,position,manual_stamp。
+struct RIME_DLL UserDbState {
+  int commits = 0;
+  double dynamic = 0.0;
+  TickCount last_tick = 0;
+  int position = 0;
+  uint64_t manual_stamp = 0;
+
+  bool Unpack(const string& value);
+  string Pack() const;
+  // 自动学习按双方各自 /tick 衰减合并。
+  void MergeAutomatic(const UserDbState& other,
+                      TickCount local_tick,
+                      TickCount remote_tick);
+  // 手排按最新版本覆盖，清除操作同样有效。
+  void MergeManual(const UserDbState& other);
+  void Merge(const UserDbState& other,
+             TickCount local_tick,
+             TickCount remote_tick);
+  bool Learn(int selection_count, TickCount present_tick);
+  bool MarkDeleted(TickCount present_tick);
+  double Score(TickCount present_tick) const;
+  bool has_learning() const {
+    return commits >= 0 && (commits > 0 || dynamic > 0.0);
+  }
+  bool is_auto_deleted() const { return commits < 0; }
+  bool has_manual_position() const { return manual_stamp != 0 && position > 0; }
+  void SetManualVersion(int new_position, uint64_t version);
 };
 
 /**
@@ -117,13 +151,20 @@ class UserDbMerger : public Sink {
   virtual bool Put(const string& key, const string& value);
 
   void CloseMerge();
+  // 保留远端数据库的全局计数。
+  void ObserveClock(uint64_t clock);
+  void ObserveTick(uint64_t tick);
+  bool failed() const { return failed_; }
 
  protected:
   Db* db_;
-  TickCount our_tick_;
-  TickCount their_tick_;
-  TickCount max_tick_;
-  int merged_entries_;
+  bool failed_ = false;
+  bool closed_ = false;
+  uint64_t observed_manual_stamp_ = 0;
+  TickCount local_tick_ = 0;
+  TickCount remote_tick_ = 0;
+  TickCount max_tick_ = 0;
+  bool remote_tick_ready_ = false;
 };
 
 class UserDbImporter : public Sink {

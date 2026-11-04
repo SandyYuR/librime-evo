@@ -18,15 +18,6 @@
 
 namespace rime {
 
-//
-
-class Patterns : public vector<boost::regex> {
- public:
-  bool Load(an<ConfigList> patterns);
-};
-
-//
-
 class Spans {
  public:
   void AddVertex(size_t vertex);
@@ -38,10 +29,10 @@ class Spans {
   size_t NextStop(size_t caret_pos) const;
   size_t Count(size_t start_pos, size_t end_pos) const;
   size_t Count() const { return vertices_.empty() ? 0 : vertices_.size() - 1; }
-  const vector<size_t>& vertices() const { return vertices_; }
   size_t start() const { return vertices_.empty() ? 0 : vertices_.front(); }
   size_t end() const { return vertices_.empty() ? 0 : vertices_.back(); }
   bool HasVertex(size_t vertex) const;
+  const vector<size_t>& vertices() const { return vertices_; }
   void set_vertices(vector<size_t>&& vertices) { vertices_ = vertices; }
 
  private:
@@ -138,6 +129,11 @@ class Sentence : public Phrase {
 };
 
 //
+
+class Patterns : public vector<boost::regex> {
+ public:
+  bool Load(an<ConfigList> patterns);
+};
 
 struct Ticket;
 

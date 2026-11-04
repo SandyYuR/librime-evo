@@ -43,6 +43,9 @@ Navigator::Navigator(const Ticket& ticket)
     keymap.Bind({XK_KP_Left, 0}, &Navigator::LeftByChar);
     keymap.Bind({XK_Right, 0}, &Navigator::Forward);
     keymap.Bind({XK_Right, kControlMask}, &Navigator::RightBySyllable);
+    // Same syllable-navigation keys in both orientations.
+    keymap.Bind({XK_Up, kShiftMask}, &Navigator::LeftBySyllable);
+    keymap.Bind({XK_Down, kShiftMask}, &Navigator::RightBySyllable);
     keymap.Bind({XK_KP_Right, 0}, &Navigator::RightByChar);
     keymap.Bind({XK_Home, 0}, &Navigator::Home);
     keymap.Bind({XK_KP_Home, 0}, &Navigator::Home);
@@ -52,10 +55,10 @@ Navigator::Navigator(const Ticket& ticket)
   {
     auto& keymap = get_keymap(Vertical);
     keymap.Bind({XK_Up, 0}, &Navigator::Rewind);
-    keymap.Bind({XK_Up, kControlMask}, &Navigator::LeftBySyllable);
+    keymap.Bind({XK_Up, kShiftMask}, &Navigator::LeftBySyllable);
     keymap.Bind({XK_KP_Up, 0}, &Navigator::LeftByChar);
     keymap.Bind({XK_Down, 0}, &Navigator::Forward);
-    keymap.Bind({XK_Down, kControlMask}, &Navigator::RightBySyllable);
+    keymap.Bind({XK_Down, kShiftMask}, &Navigator::RightBySyllable);
     keymap.Bind({XK_KP_Down, 0}, &Navigator::RightByChar);
     keymap.Bind({XK_Home, 0}, &Navigator::Home);
     keymap.Bind({XK_KP_Home, 0}, &Navigator::Home);
@@ -94,7 +97,7 @@ ProcessResult Navigator::ProcessKeyEvent(const KeyEvent& key_event) {
   TextOrientation text_orientation =
       ctx->get_option("_vertical") ? Vertical : Horizontal;
   return KeyBindingProcessor::ProcessKeyEvent(key_event, ctx, text_orientation,
-                                              FallbackOptions::All);
+                                              FallbackOptions::IgnoreShift);
 }
 
 void Navigator::OnSelect(Context* ctx) {

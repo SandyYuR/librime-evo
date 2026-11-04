@@ -5,6 +5,9 @@
 // 2011-07-05 GONG Chen <chen.sst@gmail.com>
 //
 #include <gtest/gtest.h>
+#include <sstream>
+#include <rime/dict/dict_settings.h>
+#include <rime/dict/entry_collector.h>
 #include <rime/common.h>
 #include <rime/algo/encoder.h>
 #include <rime/algo/syllabifier.h>
@@ -100,4 +103,36 @@ TEST_F(RimeDictionaryTest, ScriptLookup) {
   EXPECT_EQ(3, e3->code.size());
   EXPECT_EQ(9, e3->text.length());
   EXPECT_FALSE(d7.Next());
+}
+
+TEST(RimeAuxiliaryCompilationTest, SingleCharacterTableUsesPureCode) {
+  rime::DictSettings settings;
+  std::istringstream header(
+      "name: single_test\nversion: 1.0\n"
+      "sort: by_weight\n");
+  ASSERT_TRUE(settings.LoadFromStream(header));
+  rime::EntryCollector collector;
+  collector.Configure(&settings);
+  collector.CreateEntry("甲", "ab", "100");
+  collector.CreateEntry("家", "ab", "9000");
+  ASSERT_EQ(2u, collector.entries.size());
+  EXPECT_EQ("ab", collector.entries[0]->raw_code.ToString());
+  EXPECT_EQ("ab", collector.entries[1]->raw_code.ToString());
+  EXPECT_EQ(1u, collector.syllabary.size());
+  std::vector<rime::string> codes;
+  ASSERT_TRUE(collector.TranslateWord("甲", &codes));
+  ASSERT_FALSE(codes.empty());
+  EXPECT_EQ("ab", codes[0]);
+}
+
+TEST(RimeAuxiliaryCompilationTest, HeaderlessImportedSourceKeepsFirstRow) {
+  std::istringstream input("# data only\n甲\tcd\n家\tef\n");
+  rime::DictSettings settings;
+  ASSERT_TRUE(settings.LoadDictHeader(input, true));
+  EXPECT_TRUE(settings.empty());
+  std::string first;
+  ASSERT_TRUE(bool(std::getline(input, first)));
+  EXPECT_EQ("# data only", first);
+  ASSERT_TRUE(bool(std::getline(input, first)));
+  EXPECT_EQ("甲\tcd", first);
 }

@@ -2,29 +2,43 @@
 // Copyright RIME Developers
 // Distributed under the BSD License
 //
-// custom_phrase.txt is a stabledb table: "phrase <Tab> code [ <Tab> weight ]".
-// Entries without a weight column are packed as c=0 d=0 t=0. CreateDictEntry
-// must still return them; otherwise table_translator@custom_phrase yields
-// nothing (e.g. zdydu → 自定义短语).
+// 固定短语沿用 TableDb 三列格式，内部值字段不等于 UserDB 五字段。
 //
 #include <gtest/gtest.h>
-#include <rime/common.h>
-#include <rime/dict/user_dictionary.h>
+#include <rime/dict/table_db.h>
+#include <rime/dict/user_db.h>
 
 using namespace rime;
 
-// Unweighted table/stabledb rows pack as c=0 d=0 t=0. That is "never ticked",
-// not a decayed userdb phrase, and must still produce a dict entry.
-TEST(UserDictionary, UnweightedTableEntryIsNotDiscarded) {
-  auto e = UserDictionary::CreateDictEntry("zdydu \t自定义短语", "c=0 d=0 t=0",
-                                           /*present_tick=*/1);
-  ASSERT_TRUE(e) << "unweighted custom_phrase row (dee=0, tick=0) was dropped";
-  EXPECT_EQ("自定义短语", e->text);
+TEST(TableDb, UnweightedCustomPhraseRoundTrip) {
+  const Tsv original = {"自定义短语", "zdydu"};
+  string key, encoded;
+  ASSERT_TRUE(TableDb::format.parser(original, &key, &encoded));
+  EXPECT_EQ("zdydu \t自定义短语", key);
+  EXPECT_EQ("commits=0 dynamic=0 last_tick=0", encoded);
+  UserDbValue parsed;
+  ASSERT_TRUE(parsed.Unpack(encoded));
+  EXPECT_EQ(0, parsed.commits);
+  EXPECT_EQ(0, parsed.last_tick);
+  Tsv formatted;
+  ASSERT_TRUE(TableDb::format.formatter(key, encoded, &formatted));
+  ASSERT_EQ(3u, formatted.size());
+  EXPECT_EQ("自定义短语", formatted[0]);
+  EXPECT_EQ("zdydu", formatted[1]);
+  EXPECT_EQ("0", formatted[2]);
 }
 
-// de21e7d4: truly decayed userdb entries stay suppressed.
-TEST(UserDictionary, VeryOldDecayedEntryIsDiscarded) {
-  auto e = UserDictionary::CreateDictEntry("foo \tbar", "c=1 d=1e-201 t=1000",
-                                           /*present_tick=*/1000);
-  EXPECT_FALSE(e);
+TEST(TableDb, WeightedCustomPhraseRoundTrip) {
+  const Tsv original = {"测试", "ce shi", "100"};
+  string key, encoded;
+  ASSERT_TRUE(TableDb::format.parser(original, &key, &encoded));
+  UserDbValue value;
+  ASSERT_TRUE(value.Unpack(encoded));
+  EXPECT_EQ(100, value.commits);
+  EXPECT_GT(value.dynamic, 0.0);
+  Tsv formatted;
+  ASSERT_TRUE(TableDb::format.formatter(key, encoded, &formatted));
+  EXPECT_EQ(original, formatted);
+  EXPECT_FALSE(TableDb::format.formatter(
+      key, "unknown=100 dynamic=0 last_tick=0", &formatted));
 }

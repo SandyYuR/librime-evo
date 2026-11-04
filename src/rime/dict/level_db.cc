@@ -7,6 +7,8 @@
 
 #include <leveldb/db.h>
 #include <leveldb/write_batch.h>
+#include <optional>
+#include <unordered_map>
 #include <rime/common.h>
 #include <rime/service.h>
 #include <rime/dict/level_db.h>
@@ -50,6 +52,9 @@ struct LevelDbCursor {
 struct LevelDbWrapper {
   leveldb::DB* ptr = nullptr;
   leveldb::WriteBatch batch;
+  // LevelDB Get() cannot see a pending WriteBatch. A bounded per-batch
+  // overlay guarantees read-your-writes for repeated learning in one commit.
+  std::unordered_map<string, std::optional<string>> pending;
 
   leveldb::Status Open(const path& file_path, bool readonly) {
     leveldb::Options options;
@@ -65,6 +70,12 @@ struct LevelDbWrapper {
   LevelDbCursor* CreateCursor() { return new LevelDbCursor(ptr); }
 
   bool Fetch(const string& key, string* value) {
+    if (auto it = pending.find(key); it != pending.end()) {
+      if (!it->second)
+        return false;
+      *value = *it->second;
+      return true;
+    }
     auto status = ptr->Get(leveldb::ReadOptions(), key, value);
     return status.ok();
   }
@@ -72,6 +83,7 @@ struct LevelDbWrapper {
   bool Update(const string& key, const string& value, bool write_batch) {
     if (write_batch) {
       batch.Put(key, value);
+      pending[key] = value;
       return true;
     }
     auto status = ptr->Put(leveldb::WriteOptions(), key, value);
@@ -81,13 +93,17 @@ struct LevelDbWrapper {
   bool Erase(const string& key, bool write_batch) {
     if (write_batch) {
       batch.Delete(key);
+      pending[key] = std::nullopt;
       return true;
     }
     auto status = ptr->Delete(leveldb::WriteOptions(), key);
     return status.ok();
   }
 
-  void ClearBatch() { batch.Clear(); }
+  void ClearBatch() {
+    batch.Clear();
+    pending.clear();
+  }
 
   bool CommitBatch() {
     auto status = ptr->Write(leveldb::WriteOptions(), &batch);
@@ -270,7 +286,8 @@ bool LevelDb::OpenReadOnly() {
   loaded_ = status.ok();
 
   if (!loaded_) {
-    LOG(ERROR) << "Error opening db '" << name() << "' read-only.";
+    LOG(ERROR) << "Error opening db '" << name()
+               << "' read-only: " << status.ToString();
   }
   return loaded_;
 }
@@ -301,7 +318,9 @@ bool LevelDb::MetaUpdate(const string& key, const string& value) {
 }
 
 bool LevelDb::BeginTransaction() {
-  if (!loaded())
+  // A nested BeginTransaction used to silently discard an uncommitted batch.
+  // A read-only handle may never acquire a write transaction.
+  if (!loaded() || readonly() || in_transaction())
     return false;
   db_->ClearBatch();
   in_transaction_ = true;

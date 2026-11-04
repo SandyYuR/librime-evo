@@ -19,6 +19,7 @@
 #include <rime/gear/history_translator.h>
 #include <rime/gear/key_binder.h>
 #include <rime/gear/keypad_processor.h>
+#include <rime/gear/partial_commit.h>
 #include <rime/gear/matcher.h>
 #include <rime/gear/navigator.h>
 #include <rime/gear/punctuator.h>
@@ -27,7 +28,6 @@
 #include <rime/gear/reverse_lookup_translator.h>
 #include <rime/gear/rewriter.h>
 #include <rime/gear/schema_list_translator.h>
-#include <rime/gear/partial_commit.h>
 #include <rime/gear/script_translator.h>
 #include <rime/gear/selector.h>
 #include <rime/gear/shape.h>
@@ -54,10 +54,10 @@ static void rime_gears_initialize() {
   r.Register("fluency_editor", new Component<FluidEditor>);  // alias
   r.Register("key_binder", new Component<KeyBinder>);
   r.Register("keypad_processor", new Component<KeypadProcessor>);
+  r.Register("partial_commit", new Component<PartialCommit>);
   r.Register("navigator", new Component<Navigator>);
   r.Register("punctuator", new Component<Punctuator>);
   r.Register("recognizer", new Component<Recognizer>);
-  r.Register("partial_commit", new Component<PartialCommit>);
   r.Register("selector", new Component<Selector>);
   r.Register("speller", new Component<Speller>);
   r.Register("shape_processor", new Component<ShapeProcessor>);

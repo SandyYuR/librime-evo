@@ -138,9 +138,11 @@ RIME_DEPRECATED Bool RimeDeployConfigFile(const char* file_name,
 RIME_DEPRECATED Bool RimeSyncUserData() {
   Service::instance().CleanupAllSessions();
   Deployer& deployer(Service::instance().deployer());
-  deployer.ScheduleTask("installation_update");
-  deployer.ScheduleTask("backup_config_files");
-  deployer.ScheduleTask("user_dict_sync");
+  const bool installation = deployer.ScheduleTask("installation_update");
+  const bool configs = deployer.ScheduleTask("backup_config_files");
+  const bool dictionaries = deployer.ScheduleTask("user_dict_sync");
+  if (!installation || !configs || !dictionaries)
+    return False;
   return Bool(deployer.StartMaintenance());
 }
 

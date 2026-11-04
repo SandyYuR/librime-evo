@@ -22,6 +22,7 @@
 #include <rime/gear/poet.h>
 #include <rime/gear/table_translator.h>
 #include <rime/gear/translator_commons.h>
+#include <rime/gear/user_rank.h>
 #include <rime/gear/unity_table_encoder.h>
 
 namespace rime {
@@ -54,7 +55,10 @@ TableTranslation::TableTranslation(TranslatorOptions* options,
 bool TableTranslation::Next() {
   if (exhausted())
     return false;
-  if (PreferUserPhrase()) {
+  // Peek 和 Next 必须使用相同的候选迭代器。
+  const bool consumed_user = PreferUserPhrase();
+  ++emitted_position_;
+  if (consumed_user) {
     uter_.Next();
     if (uter_.exhausted())
       FetchMoreUserPhrases();
@@ -88,7 +92,8 @@ an<Candidate> TableTranslation::Peek() {
     phrase->set_comment(comment);
     phrase->set_preedit(preedit_);
     phrase->set_quality(std::exp(e->weight) + options_->initial_quality() +
-                        (incomplete ? -1 : 0) + (is_user_phrase ? 0.5 : 0));
+                        (incomplete ? -1 : 0) +
+                        (is_user_phrase && e->manual_position == 0 ? 0.5 : 0));
   }
   return phrase;
 }
@@ -106,10 +111,11 @@ bool TableTranslation::PreferUserPhrase() {
     return true;
   if (iter_.Peek()->remaining_code_length == 0 &&
       (uter_.Peek()->remaining_code_length != 0 ||
-       is_constructed(uter_.Peek().get())))
+       (is_constructed(uter_.Peek().get()) &&
+        uter_.Peek()->manual_position <= 0)))
     return false;
-  else
-    return true;
+  return user_rank::PreferUser(*uter_.Peek(), *iter_.Peek(),
+                               emitted_position_ + 1);
 }
 
 // LazyTableTranslation
@@ -124,7 +130,7 @@ class LazyTableTranslation : public TableTranslation {
                        size_t start,
                        size_t end,
                        const string& preedit,
-                       bool enable_user_dict);
+                       bool user_dict_available);
   bool FetchUserPhrases(TableTranslator* translator);
   virtual bool FetchMoreUserPhrases();
   virtual bool FetchMoreTableEntries();
@@ -143,7 +149,7 @@ LazyTableTranslation::LazyTableTranslation(TableTranslator* translator,
                                            size_t start,
                                            size_t end,
                                            const string& preedit,
-                                           bool enable_user_dict)
+                                           bool user_dict_available)
     : TableTranslation(translator,
                        translator->language(),
                        input,
@@ -152,11 +158,21 @@ LazyTableTranslation::LazyTableTranslation(TableTranslator* translator,
                        preedit),
       dict_(translator->dict()),
       blacklist_(&translator->blacklist()),
-      user_dict_(enable_user_dict ? translator->user_dict() : NULL),
+      user_dict_(user_dict_available ? translator->user_dict() : NULL),
       limit_(kInitialSearchLimit),
       user_dict_limit_(kInitialSearchLimit) {
   FetchUserPhrases(translator) || FetchMoreUserPhrases();
   FetchMoreTableEntries();
+  // 手排位置按完整同码词库计算，不受初始候选数量限制。
+  const bool has_manual = user_rank::HasManualPin(uter_);
+  if (has_manual) {
+    DictEntryIterator anchors;
+    if (dict_)
+      dict_->LookupWords(&anchors, input_, false, 0, blacklist_);
+    user_rank::Apply(&iter_, &uter_, false, &anchors);
+  } else {
+    user_rank::Apply(&iter_, &uter_);
+  }
   CheckEmpty();
 }
 
@@ -201,6 +217,7 @@ bool LazyTableTranslation::FetchMoreTableEntries() {
   }
   if (more.entry_count() > previous_entry_count) {
     more.Skip(previous_entry_count);
+    user_rank::FilterPinnedStatic(&more, uter_);
     iter_ = std::move(more);
   }
   return true;
@@ -250,7 +267,7 @@ an<Translation> TableTranslator::Query(const string& input,
 
   FinishSession();
 
-  bool enable_user_dict =
+  bool user_dict_available =
       user_dict_ && user_dict_->loaded() && !IsUserDictDisabledFor(input);
 
   const string& preedit(input);
@@ -261,19 +278,20 @@ an<Translation> TableTranslator::Query(const string& input,
   if (enable_completion_) {
     translation = Cached<LazyTableTranslation>(this, code, segment.start,
                                                segment.start + input.length(),
-                                               preedit, enable_user_dict);
+                                               preedit, user_dict_available);
   } else {
     DictEntryIterator iter;
     if (dict_ && dict_->loaded()) {
       dict_->LookupWords(&iter, code, false, 0, &blacklist());
     }
     UserDictEntryIterator uter;
-    if (enable_user_dict) {
+    if (user_dict_available) {
       user_dict_->LookupWords(&uter, code, false);
       if (encoder_ && encoder_->loaded()) {
         encoder_->LookupPhrases(&uter, code, false);
       }
     }
+    user_rank::Apply(&iter, &uter);
     if (!iter.exhausted() || !uter.exhausted())
       translation = Cached<TableTranslation>(
           this, language(), code, segment.start, segment.start + input.length(),
@@ -301,6 +319,7 @@ an<Translation> TableTranslator::Query(const string& input,
   if (translation && translation->exhausted()) {
     return nullptr;
   }
+  // 在翻译结果层完成去重。
   translation = New<DistinctTranslation>(translation);
   if (contextual_suggestions_) {
     return poet_->ContextualWeighted(translation, input, segment.start, this);
@@ -312,13 +331,18 @@ bool TableTranslator::Memorize(const CommitEntry& commit_entry) {
   if (!user_dict_)
     return false;
   for (const DictEntry* e : commit_entry.elements) {
+    if (!e)
+      return false;
+    bool written = false;
     if (is_constructed(e)) {
       DictEntry blessed(*e);
       UnityTableEncoder::RemovePrefix(&blessed.custom_code);
-      user_dict_->UpdateEntry(blessed, 1);
+      written = user_dict_->UpdateEntry(blessed, 1);
     } else {
-      user_dict_->UpdateEntry(*e, 1);
+      written = user_dict_->UpdateEntry(*e, 1);
     }
+    if (!written)
+      return false;
   }
   if (encoder_ && encoder_->loaded()) {
     if (commit_entry.elements.size() > 1) {

@@ -29,9 +29,6 @@ static void rime_dict_initialize() {
   r.Register("stabledb", new DbComponent<StableDb>);
   r.Register("plain_userdb", new UserDbComponent<TextDb>);
   r.Register("userdb", new UserDbComponent<LevelDb>);
-  // NOTE: register a legacy_userdb component in your plugin if you wish to
-  // upgrade userdbs from an old file format (eg. TreeDb) during maintenance.
-  // r.Register("legacy_userdb", ...);
 
   r.Register("corrector", new CorrectorComponent);
 

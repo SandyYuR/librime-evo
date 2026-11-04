@@ -6,6 +6,8 @@
 //
 #include <algorithm>
 #include <cfloat>
+#include <climits>
+#include <limits>
 #include <cmath>
 #include <boost/algorithm/string.hpp>
 #include <boost/scope_exit.hpp>
@@ -20,6 +22,7 @@
 #include <rime/dict/db.h>
 #include <rime/dict/table.h>
 #include <rime/dict/user_dictionary.h>
+#include <rime/dict/user_manual_order.h>
 #include <rime/dict/vocabulary.h>
 
 namespace rime {
@@ -28,6 +31,7 @@ struct DfsState {
   size_t depth_limit;
   size_t predict_word_from_depth;
   TickCount present_tick;
+  bool use_automatic = true;
   Code code;
   vector<double> credibility;
   vector<double> quality_len;
@@ -75,7 +79,7 @@ void DfsState::RecruitEntry(size_t pos,
   string full_code;
   auto e = UserDictionary::CreateDictEntry(
       key, value, present_tick, credibility.back(), quality_len.back(),
-      syllabary ? &full_code : nullptr);
+      syllabary ? &full_code : nullptr, use_automatic);
   if (e) {
     if (syllabary) {
       vector<string> syllables =
@@ -108,6 +112,26 @@ void UserDictEntryIterator::Add(an<DictEntry>&& entry) {
 
 void UserDictEntryIterator::SetEntries(DictEntryList&& entries) {
   cache_ = std::move(entries);
+}
+
+void UserDictEntryIterator::SortAll() {
+  // 只调整本次用户候选，不改全局排序规则。
+  index_ = 0;  // called before iteration; previous skip was AUX filtering
+  std::stable_sort(cache_.begin(), cache_.end(),
+                   [](const an<DictEntry>& a, const an<DictEntry>& b) {
+                     if (a->weight != b->weight)
+                       return a->weight > b->weight;
+                     if (a->manual_position > 0 && b->manual_position > 0) {
+                       if (a->manual_position != b->manual_position)
+                         return a->manual_position < b->manual_position;
+                       if (a->manual_version != b->manual_version)
+                         return a->manual_version > b->manual_version;
+                       return a->text < b->text;
+                     }
+                     return false;
+                   });
+  while (!exhausted() && !Allows(Peek()))
+    ++index_;
 }
 
 void UserDictEntryIterator::SortRange(size_t start, size_t count) {
@@ -152,13 +176,20 @@ bool UserDictEntryIterator::Next() {
 
 // UserDictionary members
 
-UserDictionary::UserDictionary(const string& name, an<Db> db)
-    : name_(name), db_(db) {}
+UserDictionary::UserDictionary(
+    const string& name,
+    an<Db> db,
+    std::shared_ptr<std::atomic<TickCount>> shared_tick)
+    : name_(name),
+      db_(db),
+      shared_tick_(shared_tick ? std::move(shared_tick)
+                               : std::make_shared<std::atomic<TickCount>>(0)) {}
 
 UserDictionary::~UserDictionary() {
-  if (loaded()) {
-    CommitPendingTransaction();
-  }
+  // A handle may only abort the transaction it started; it must never commit
+  // a transaction merely because another handle shares the same Db.
+  if (transaction_active_)
+    AbortPendingTransaction();
 }
 
 void UserDictionary::Attach(const an<Table>& table, const an<Prism>& prism) {
@@ -167,6 +198,8 @@ void UserDictionary::Attach(const an<Table>& table, const an<Prism>& prism) {
 }
 
 bool UserDictionary::Load() {
+  load_attempted_ = true;
+  load_valid_ = false;
   if (!db_ || db_->disabled())
     return false;
   if (!db_->loaded() && !db_->Open()) {
@@ -179,11 +212,39 @@ bool UserDictionary::Load() {
     }
     return false;
   }
-  return FetchTickCount() || Initialize();
+  // 已有数据库必须通过格式校验，不能擅自改写标记。
+  string db_type, format;
+  const bool ready =
+      db_->MetaFetch("/db_type", &db_type) && db_type == "userdb" &&
+      db_->MetaFetch("/userdb_format", &format) && format == kUserDbFormat;
+  if (!ready)
+    return false;
+  const auto* transaction = dynamic_cast<const Transactional*>(db_.get());
+  if (transaction && transaction->in_transaction()) {
+    tick_ = shared_tick_->load(std::memory_order_relaxed);
+  } else {
+    string raw_tick;
+    if (!db_->MetaFetch("/tick", &raw_tick))
+      return false;
+    try {
+      size_t consumed = 0;
+      const TickCount persisted = std::stoull(raw_tick, &consumed);
+      if (consumed != raw_tick.size())
+        return false;
+      tick_ =
+          (std::max)(persisted, shared_tick_->load(std::memory_order_relaxed));
+      shared_tick_->store(tick_, std::memory_order_relaxed);
+    } catch (...) {
+      return false;
+    }
+  }
+  load_valid_ = true;
+  return true;
 }
 
 bool UserDictionary::loaded() const {
-  return db_ && !db_->disabled() && db_->loaded();
+  return db_ && !db_->disabled() && db_->loaded() &&
+         (!load_attempted_ || load_valid_);
 }
 
 bool UserDictionary::readonly() const {
@@ -321,10 +382,13 @@ an<UserDictEntryCollector> UserDictionary::Lookup(
       start_pos >= syll_graph.interpreted_length)
     return nullptr;
   DfsState state;
+  state.use_automatic = automatic_learning_enabled();
   state.depth_limit = depth_limit;
   state.predict_word_from_depth = predict_word_from_depth;
-  FetchTickCount();
-  state.present_tick = tick_ + 1;
+  const TickCount current_tick = tick();
+  state.present_tick = current_tick == std::numeric_limits<TickCount>::max()
+                           ? current_tick
+                           : current_tick + 1;
   state.credibility.push_back(initial_credibility);
   state.quality_len.push_back(0.0);
   state.accessor = db_->Query("");
@@ -360,7 +424,12 @@ size_t UserDictionary::LookupWords(UserDictEntryIterator* result,
                                    bool predictive,
                                    size_t limit,
                                    string* resume_key) {
-  TickCount present_tick = tick_ + 1;
+  if (!result || !loaded())
+    return 0;
+  const TickCount current_tick = tick();
+  TickCount present_tick = current_tick == std::numeric_limits<TickCount>::max()
+                               ? current_tick
+                               : current_tick + 1;
   size_t len = input.length();
   size_t start = result->cache_size();
   size_t count = 0;
@@ -392,7 +461,8 @@ size_t UserDictionary::LookupWords(UserDictEntryIterator* result,
       break;
     }
     last_key = key;
-    auto e = CreateDictEntry(key, value, present_tick, 1.0, len, &full_code);
+    auto e = CreateDictEntry(key, value, present_tick, 1.0, len, &full_code,
+                             automatic_learning_enabled());
     if (!e)
       continue;
     e->custom_code = full_code;
@@ -425,88 +495,230 @@ bool UserDictionary::UpdateEntry(const DictEntry& entry, int commits) {
 bool UserDictionary::UpdateEntry(const DictEntry& entry,
                                  int commits,
                                  const string& new_entry_prefix) {
-  string code_str(entry.custom_code);
-  if (code_str.empty() && !TranslateCodeToString(entry.code, &code_str))
+  if (!loaded() || readonly() || !write_owner_)
     return false;
+  // 手动模式只允许手排；自动学习和自动删除都不能改动前三字段。
+  if (user_dict_mode_ != "auto")
+    return commits >= 0;
+  // commits=0 时仅增加 0.1 动态值。
+  string code_str(entry.custom_code);
+  if (code_str.empty() && !TranslateCodeToString(entry.code, &code_str)) {
+    return false;
+  }
+  if (code_str.empty()) {
+    return false;
+  }
+  // 键的编码末尾必须有空格。
+  if (code_str.back() != ' ')
+    code_str += ' ';
   string key(code_str + '\t' + entry.text);
-  string value;
-  UserDbValue v;
-  if (db_->Fetch(key, &value)) {
-    v.Unpack(value);
-    if (v.tick > tick_) {
-      v.tick = tick_;  // fix abnormal timestamp
-    }
-  } else if (!new_entry_prefix.empty()) {
+  string raw;
+  UserDbState state;
+  bool exists = db_->Fetch(key, &raw);
+  if (exists && !state.Unpack(raw)) {
+    return false;
+  }
+  if (!exists && !new_entry_prefix.empty())
     key.insert(0, new_entry_prefix);
-  }
+  bool ok = true;
+  // 沿用原版学习公式；只有主动选择增加 /tick。
   if (commits > 0) {
-    if (v.commits < 0)
-      v.commits = -v.commits;  // revive a deleted item
-    v.commits += commits;
-    UpdateTickCount(1);
-    v.dee = algo::formula_d(commits, (double)tick_, v.dee, (double)v.tick);
+    // 先检查次数溢出，再增加 /tick。
+    if (state.commits == INT_MIN ||
+        (state.commits >= 0 && state.commits > INT_MAX - commits) ||
+        (state.commits < 0 && -int64_t(state.commits) > INT_MAX - commits))
+      return false;
+    if (tick_ == std::numeric_limits<TickCount>::max())
+      return false;
+    ok = UpdateTickCount(1);
+    if (ok && state.last_tick > tick_)
+      state.last_tick = tick_;
+    if (ok)
+      ok = state.Learn(commits, tick_);
+  } else if (commits < 0) {
+    if (state.last_tick > tick_)
+      state.last_tick = tick_;
+    ok = state.MarkDeleted(tick_);
   } else if (commits == 0) {
-    const double k = 0.1;
-    v.dee = algo::formula_d(k, (double)tick_, v.dee, (double)v.tick);
-  } else if (commits < 0) {  // mark as deleted
-    v.commits = (std::min)(-1, -v.commits);
-    v.dee = algo::formula_d(0.0, (double)tick_, v.dee, (double)v.tick);
+    if (state.last_tick > tick_)
+      state.last_tick = tick_;
+    ok = state.Learn(0, tick_);
   }
-  v.tick = tick_;
-  return db_->Update(key, v.Pack());
+  const bool written = ok && db_->Update(key, state.Pack());
+  return written;
+}
+
+bool UserDictionary::GetEntryCode(const DictEntry& entry, string* code) {
+  if (!code || !loaded())
+    return false;
+  *code = entry.custom_code;
+  if (code->empty() && !TranslateCodeToString(entry.code, code))
+    return false;
+  if (code->empty())
+    return false;
+  if (code->back() != ' ')
+    code->push_back(' ');
+  return true;
+}
+
+bool UserDictionary::GetUserState(const DictEntry& entry, UserDbState* state) {
+  if (!state || !loaded())
+    return false;
+  string code;
+  if (!GetEntryCode(entry, &code))
+    return false;
+  string raw;
+  const bool found = db_->Fetch(code + '\t' + entry.text, &raw);
+  const bool parsed = found && state->Unpack(raw);
+  return parsed;
+}
+
+bool UserDictionary::SetManualPosition(const DictEntry& entry, int position) {
+  if (!loaded() || readonly() || !write_owner_ || position < 0)
+    return false;
+  string code;
+  if (!GetEntryCode(entry, &code))
+    return false;
+  return user_manual_order::SetManual(db_.get(), code, entry.text, position);
+}
+
+bool UserDictionary::ResetAutoLearning(const DictEntry& entry) {
+  if (!loaded() || readonly() || !write_owner_)
+    return false;
+  string code;
+  if (!GetEntryCode(entry, &code))
+    return false;
+  return user_manual_order::ResetAuto(db_.get(), code, entry.text);
+}
+
+bool UserDictionary::ResetManualPosition(const DictEntry& entry) {
+  if (!loaded() || readonly() || !write_owner_)
+    return false;
+  string code;
+  if (!GetEntryCode(entry, &code))
+    return false;
+  return user_manual_order::ResetManual(db_.get(), code, entry.text);
+}
+
+bool UserDictionary::MoveManualOneStep(const DictEntry& selected,
+                                       const DictEntry& neighbor,
+                                       int source_position,
+                                       int direction,
+                                       bool neighbor_visible) {
+  if (!loaded() || readonly() || !write_owner_)
+    return false;
+  string code;
+  if (!GetEntryCode(selected, &code))
+    return false;
+  // 邻词仅供固定位置冲突时使用，不能因为它不属于当前 UserDB 而阻止移动。
+  string adjacent_code;
+  if (!neighbor.text.empty())
+    GetEntryCode(neighbor, &adjacent_code);
+  return user_manual_order::MoveAdjacent(
+      db_.get(), code, selected.text, adjacent_code, neighbor.text,
+      source_position, direction, neighbor_visible);
 }
 
 bool UserDictionary::UpdateTickCount(TickCount increment) {
-  tick_ += increment;
-  try {
-    return db_->MetaUpdate("/tick", std::to_string(tick_));
-  } catch (...) {
+  // NewTransaction refreshes the persisted value once. Publish the shared
+  // committed tick only after commit, so readers never see aborted ticks.
+  if (!write_owner_)
     return false;
-  }
-}
-
-bool UserDictionary::Initialize() {
-  return db_->MetaUpdate("/tick", "0");
-}
-
-bool UserDictionary::FetchTickCount() {
-  string value;
-  try {
-    // an earlier version mistakenly wrote tick count into an empty key
-    if (!db_->MetaFetch("/tick", &value) && !db_->Fetch("", &value))
+  if (!transaction_active_) {
+    // Preserve direct UserDictionary callers; the normal translator path has
+    // already refreshed /tick in NewTransaction and avoids this extra read.
+    string raw_tick;
+    if (!db_->MetaFetch("/tick", &raw_tick))
       return false;
-    tick_ = std::stoul(value);
-    return true;
-  } catch (...) {
-    // tick_ = 0;
-    return false;
+    try {
+      size_t used = 0;
+      const TickCount persisted = std::stoull(raw_tick, &used);
+      if (used != raw_tick.size())
+        return false;
+      tick_ = (std::max)(tick_, persisted);
+    } catch (...) {
+      return false;
+    }
   }
+  if (increment > std::numeric_limits<TickCount>::max() - tick_)
+    return false;
+  const TickCount next = tick_ + increment;
+  if (!db_->MetaUpdate("/tick", std::to_string(next)))
+    return false;
+  tick_ = next;
+  if (!transaction_active_)
+    shared_tick_->store(tick_, std::memory_order_relaxed);
+  return true;
 }
 
 bool UserDictionary::NewTransaction() {
+  if (!loaded() || readonly() || !write_owner_)
+    return false;
   auto db = As<Transactional>(db_);
   if (!db)
     return false;
-  CommitPendingTransaction();
+  if (transaction_active_) {
+    if (db->in_transaction())
+      return true;
+    transaction_active_ = false;
+    tick_ = shared_tick_->load(std::memory_order_relaxed);
+  }
+  // Never commit a transaction started by another handle.
+  if (db->in_transaction())
+    return false;
+
+  string raw_tick;
+  if (!db_->MetaFetch("/tick", &raw_tick))
+    return false;
+  try {
+    size_t used = 0;
+    const TickCount persisted = std::stoull(raw_tick, &used);
+    if (used != raw_tick.size())
+      return false;
+    tick_ = (std::max)(tick_, persisted);
+    tick_ = (std::max)(tick_, shared_tick_->load(std::memory_order_relaxed));
+  } catch (...) {
+    return false;
+  }
+
   transaction_time_ = time(NULL);
-  return db->BeginTransaction();
+  if (!db->BeginTransaction())
+    return false;
+  transaction_active_ = true;
+  return true;
 }
 
 bool UserDictionary::RevertRecentTransaction() {
-  auto db = As<Transactional>(db_);
-  if (!db || !db->in_transaction())
+  if (!transaction_active_ || time(NULL) - transaction_time_ > 3 /*seconds*/)
     return false;
-  if (time(NULL) - transaction_time_ > 3 /*seconds*/)
-    return false;
-  return db->AbortTransaction();
+  return AbortPendingTransaction();
 }
 
 bool UserDictionary::CommitPendingTransaction() {
   auto db = As<Transactional>(db_);
-  if (db && db->in_transaction()) {
-    return db->CommitTransaction();
+  if (!write_owner_ || !transaction_active_ || !db || !db->in_transaction())
+    return false;
+  if (!db->CommitTransaction())
+    return false;
+  transaction_active_ = false;
+  shared_tick_->store(tick_, std::memory_order_relaxed);
+  return true;
+}
+
+bool UserDictionary::AbortPendingTransaction() {
+  auto db = As<Transactional>(db_);
+  if (!transaction_active_ || !db)
+    return false;
+  if (!db->in_transaction()) {
+    transaction_active_ = false;
+    tick_ = shared_tick_->load(std::memory_order_relaxed);
+    return true;
   }
-  return false;
+  if (!db->AbortTransaction())
+    return false;
+  transaction_active_ = false;
+  tick_ = shared_tick_->load(std::memory_order_relaxed);
+  return true;
 }
 
 bool UserDictionary::TranslateCodeToString(const Code& code, string* result) {
@@ -529,38 +741,41 @@ bool UserDictionary::TranslateCodeToString(const Code& code, string* result) {
   return true;
 }
 
-// Corresponds to log2(1/T)*200*ln(2) ticks.
-constexpr double kDiscardThreshold = 1e-200;
-
 an<DictEntry> UserDictionary::CreateDictEntry(const string& key,
                                               const string& value,
                                               TickCount present_tick,
                                               double credibility,
                                               double quality_len,
                                               string* full_code) {
+  return CreateDictEntry(key, value, present_tick, credibility, quality_len,
+                         full_code, true);
+}
+
+an<DictEntry> UserDictionary::CreateDictEntry(const string& key,
+                                              const string& value,
+                                              TickCount present_tick,
+                                              double credibility,
+                                              double quality_len,
+                                              string* full_code,
+                                              bool use_automatic) {
   an<DictEntry> e;
   size_t separator_pos = key.find('\t');
   if (separator_pos == string::npos)
     return e;
-  UserDbValue v;
+  UserDbState v;
   if (!v.Unpack(value))
     return e;
-  if (v.commits < 0)  // deleted entry
+  const bool pinned = v.has_manual_position();
+  // 自动删除词仅在有效手排时显示；清除手排后重新隐藏。
+  if (!pinned && (!use_automatic || !v.has_learning()))
     return e;
-  if (v.tick < present_tick)
-    v.dee = algo::formula_d(0, (double)present_tick, v.dee, (double)v.tick);
-  // tick==0: table/stabledb phrases (custom_phrase.txt etc.) never entered
-  // userdb decay. Discard only aged user-history entries.
-  if (v.tick != 0 && v.dee <= kDiscardThreshold)
-    return e;
-  // create!
   e = New<DictEntry>();
   e->text = key.substr(separator_pos + 1);
-  e->commit_count = v.commits;
-  // TODO: argument s not defined...
-  double weight = algo::formula_p(0, (double)v.commits / present_tick,
-                                  (double)present_tick, v.dee);
-  e->weight = log(weight > 0 ? weight : DBL_EPSILON) + credibility;
+  e->commit_count = use_automatic && v.commits > 0 ? v.commits : 0;
+  e->manual_position = pinned ? v.position : 0;
+  e->manual_version = v.manual_stamp;
+  // 自动分数按原版计算；手排只临时调整候选权重。
+  e->weight = (use_automatic ? v.Score(present_tick) : -1.0) + credibility;
   e->quality_len = quality_len;
   if (full_code) {
     *full_code = key.substr(0, separator_pos);
@@ -589,17 +804,29 @@ UserDictionary* UserDictionaryComponent::Create(const string& dict_name,
     db.reset(component->Create(dict_name));
     db_pool_[dict_name] = db;
   }
-  return new UserDictionary(dict_name, db);
+  auto shared_tick = tick_pool_[dict_name].lock();
+  if (!shared_tick) {
+    shared_tick = std::make_shared<std::atomic<TickCount>>(0);
+    tick_pool_[dict_name] = shared_tick;
+  }
+  return new UserDictionary(dict_name, db, std::move(shared_tick));
 }
 
 UserDictionary* UserDictionaryComponent::Create(const Ticket& ticket) {
   if (!ticket.schema)
     return NULL;
   Config* config = ticket.schema->config();
-  bool enable_user_dict = true;
-  config->GetBool(ticket.name_space + "/enable_user_dict", &enable_user_dict);
-  if (!enable_user_dict)
-    return NULL;
+  // 仅由 user_dict_mode 控制读写模式。
+  string mode("auto");
+  config->GetString(ticket.name_space + "/user_dict_mode", &mode);
+  if (mode == "off") {
+    return nullptr;
+  }
+  if (mode != "auto" && mode != "manual") {
+    LOG(ERROR) << "invalid user_dict_mode for UserDB translator namespace="
+               << ticket.name_space << " mode=" << mode;
+    return nullptr;
+  }
   string dict_name;
   if (config->GetString(ticket.name_space + "/user_dict", &dict_name)) {
     // user specified name
@@ -615,8 +842,10 @@ UserDictionary* UserDictionaryComponent::Create(const Ticket& ticket) {
   if (config->GetString(ticket.name_space + "/db_class", &db_class)) {
     // user specified db class
   }
-  // obtain userdb object
-  return Create(dict_name, db_class);
+  auto user_dict = Create(dict_name, db_class);
+  if (user_dict)
+    user_dict->SetUserDictMode(mode);
+  return user_dict;
 }
 
 }  // namespace rime

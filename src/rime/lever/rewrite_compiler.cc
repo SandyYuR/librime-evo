@@ -22,6 +22,7 @@
 #include <rime/config.h>
 #include <rime/deployer.h>
 #include <rime/lever/rewrite_preset.h>
+#include <rime/path_resolver.h>
 #include <rime/dict/rewrite_store.h>
 
 namespace rime {
@@ -67,88 +68,26 @@ bool ParseFileLine(std::string_view source, string* key, string* value) {
   return !key->empty() && !value->empty();
 }
 
-bool IsWithin(const path& root, const path& candidate) {
-  auto root_it = root.begin();
-  auto candidate_it = candidate.begin();
-  for (; root_it != root.end() && candidate_it != candidate.end();
-       ++root_it, ++candidate_it) {
-    if (*root_it != *candidate_it) {
-      return false;
-    }
-  }
-  return root_it == root.end();
-}
-
-path ResolveUnderRoot(const path& root, const path& relative) {
-  if (root.empty()) {
-    return path();
-  }
-  std::error_code ec;
-  const path canonical_root = fs::weakly_canonical(root, ec);
-  if (ec || !fs::is_directory(canonical_root, ec) || ec) {
-    return path();
-  }
-
-  const path candidate = canonical_root / relative;
-  const path canonical_candidate = fs::canonical(candidate, ec);
-  if (ec || !fs::is_regular_file(canonical_candidate, ec) || ec ||
-      !IsWithin(canonical_root, canonical_candidate)) {
-    return path();
-  }
-  return canonical_candidate;
-}
-
 path ResolveDataFile(Deployer* deployer,
                      const string& section_name,
                      const string& file_name) {
-  if (!deployer || file_name.empty()) {
-    return path();
+  if (!deployer || !safe_path::ValidRelativeName(file_name)) {
+    LOG(ERROR) << "rewriter@" << section_name
+               << "/files contains invalid relative path '" << file_name
+               << "'.";
+    return {};
   }
-
-  const path requested(file_name);
-  // Source files are data resources, not arbitrary paths. Reject absolute
-  // paths and parent traversal so a schema cannot make deployment read a
-  // file outside the configured data roots. Symlink escapes are rejected by
-  // ResolveUnderRoot as well.
-  if (requested.is_absolute() || requested.has_root_name() ||
-      requested.has_root_directory()) {
-    LOG(ERROR)
-        << "rewriter@" << section_name << "/files contains absolute path '"
-        << file_name
-        << "'; use a path relative to Rime's user/shared data directory.";
-    return path();
-  }
-  // Inspect the spelling supplied by the schema before normalizing it. A
-  // path such as "a/../b" happens to remain under the root, but accepting
-  // parent components makes the boundary harder to audit and broadens the
-  // file contract unnecessarily.
-  for (const auto& component : requested) {
-    if (component == "..") {
-      LOG(ERROR) << "rewriter@" << section_name
-                 << "/files contains unsafe path '" << file_name
-                 << "'; '..' components are not allowed.";
-      return path();
-    }
-  }
-  const path relative = requested.lexically_normal();
-
-  path resolved = ResolveUnderRoot(deployer->user_data_dir, relative);
-  if (!resolved.empty()) {
+  // Prefer user resources, then shared resources; do not allow escaping
+  // either root via a symlink or an absolute/parent path.
+  path resolved = safe_path::ExistingFile(deployer->user_data_dir, file_name);
+  if (!resolved.empty())
     return resolved;
-  }
-  resolved = ResolveUnderRoot(deployer->shared_data_dir, relative);
-  if (!resolved.empty()) {
+  resolved = safe_path::ExistingFile(deployer->shared_data_dir, file_name);
+  if (!resolved.empty())
     return resolved;
-  }
   LOG(ERROR) << "rewriter@" << section_name << " source '" << file_name
-             << "' was not found as a regular file inside Rime data "
-                "directories; searched user='"
-             << deployer->user_data_dir << "', shared='"
-             << deployer->shared_data_dir << "'. Check rewriter@"
-             << section_name
-             << "/files and the file path; symlinks must remain inside these "
-                "directories.";
-  return path();
+             << "' is missing or outside its user/shared data roots.";
+  return {};
 }
 
 void ReadStringList(Config* config, const string& key, vector<string>* values);

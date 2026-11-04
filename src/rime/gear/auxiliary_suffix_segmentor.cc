@@ -56,7 +56,10 @@ bool AuxiliarySuffixSegmentor::Proceed(Segmentation* segmentation) {
   const string& input = segmentation->input();
   const size_t start = segmentation->GetCurrentStartPosition();
   const size_t marker = input.find(trigger_, start);
-  if (marker == string::npos) {
+  // 只有以小写字母开头、且触发符位于编码之后的输入才可能有 AUX 后缀。
+  // 使用完整输入判断：分段推进后 start 可能已经等于 marker。
+  if (marker == string::npos || marker == 0 || input.empty() ||
+      input.front() < 'a' || input.front() > 'z') {
     ClearAuxiliarySuffixState(segmentation);
     return true;
   }
@@ -71,16 +74,15 @@ bool AuxiliarySuffixSegmentor::Proceed(Segmentation* segmentation) {
     segmentation->Trim();
   }
   InvalidateMainSegment(segmentation, marker);
-  if (marker + trigger_.size() >= input.size()) {
-    // Keep the trigger out of abc_segmentor until an AUX character follows.
-    return false;
-  }
-
   if (marker > start) {
     Segment segment(start, marker);
     segment.tags.insert("abc");
     segment.tags.insert("auxiliary_suffix");
     segmentation->AddSegment(segment);
+  }
+  if (marker + trigger_.size() >= input.size()) {
+    // Keep the trigger out of abc_segmentor until an AUX character follows.
+    return false;
   }
   // The suffix is an input constraint, not a separate translatable segment.
   return false;
