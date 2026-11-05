@@ -15,7 +15,6 @@
 
 namespace rime {
 
-// 存储格式固定为 userdb-v1，未修改结构前不升级。
 inline constexpr char kUserDbFormat[] = "userdb-v1";
 
 using TickCount = uint64_t;

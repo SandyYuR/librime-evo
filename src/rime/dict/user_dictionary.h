@@ -111,6 +111,7 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
                                 // commits/dynamic/last_tick
   bool UpdateTickCount(TickCount increment);
   void SetUserDictMode(const string& mode) { user_dict_mode_ = mode; }
+  const string& user_dict_mode() const { return user_dict_mode_; }
   bool automatic_learning_enabled() const { return user_dict_mode_ == "auto"; }
 
   bool NewTransaction();
@@ -129,7 +130,6 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
                                                 double credibility = 0.0,
                                                 double quality_len = 0.0,
                                                 string* full_code = nullptr);
-  // 保持旧调用签名；手动模式不参与自动评分。
   RIME_DLL static an<DictEntry> CreateDictEntry(const string& key,
                                                 const string& value,
                                                 TickCount present_tick,
