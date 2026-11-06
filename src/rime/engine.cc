@@ -113,6 +113,8 @@ class ConcreteEngine : public Engine {
   void OnContextUpdate(Context* ctx);
   void OnOptionUpdate(Context* ctx, const string& option);
   void OnPropertyUpdate(Context* ctx, const string& property);
+  void LoadInputTypes();
+  void EnforceInputTypeOption(Context* ctx, const string& option);
 
   vector<ComponentEntry<Processor>> processors_;
   vector<ComponentEntry<Segmentor>> segmentors_;
@@ -121,6 +123,9 @@ class ConcreteEngine : public Engine {
   vector<of<Formatter>> formatters_;
   vector<of<Processor>> post_processors_;
   an<Switcher> switcher_;
+  vector<string> input_type_options_;
+  string input_type_reset_;
+  bool enforcing_input_type_ = false;
 };
 
 // implementations
@@ -203,6 +208,7 @@ void ConcreteEngine::OnContextUpdate(Context* ctx) {
 void ConcreteEngine::OnOptionUpdate(Context* ctx, const string& option) {
   if (!ctx)
     return;
+  EnforceInputTypeOption(ctx, option);
   LOG(INFO) << "updated option: " << option;
   UpdateComponentConditions(processors_, ctx);
   UpdateComponentConditions(segmentors_, ctx);
@@ -216,6 +222,55 @@ void ConcreteEngine::OnOptionUpdate(Context* ctx, const string& option) {
   bool option_is_on = ctx->get_option(option);
   string msg(option_is_on ? option : "!" + option);
   message_sink_("option", msg);
+}
+
+void ConcreteEngine::LoadInputTypes() {
+  input_type_options_.clear();
+  input_type_reset_.clear();
+  Config* config = schema_->config();
+  if (!config)
+    return;
+
+  auto input_type_item = config->GetItem("input_types");
+  auto input_types = As<ConfigMap>(input_type_item);
+  auto options = As<ConfigList>(input_type_item);
+  if (input_types)
+    options = As<ConfigList>(input_types->Get("options"));
+  if (!options)
+    return;
+  for (const auto& item : *options) {
+    auto option_map = As<ConfigMap>(item);
+    if (!option_map)
+      continue;
+    string option;
+    auto option_value = option_map->GetValue("option");
+    if (!option_value || !option_value->GetString(&option) || option.empty())
+      continue;
+    if (std::find(input_type_options_.begin(), input_type_options_.end(),
+                  option) == input_type_options_.end()) {
+      input_type_options_.push_back(std::move(option));
+    }
+  }
+  if (input_types) {
+    if (auto reset = input_types->GetValue("reset"))
+      reset->GetString(&input_type_reset_);
+  }
+}
+
+void ConcreteEngine::EnforceInputTypeOption(Context* ctx,
+                                            const string& option) {
+  if (enforcing_input_type_ || !ctx || !ctx->get_option(option))
+    return;
+  if (std::find(input_type_options_.begin(), input_type_options_.end(),
+                option) == input_type_options_.end())
+    return;
+
+  enforcing_input_type_ = true;
+  for (const auto& other : input_type_options_) {
+    if (other != option && ctx->get_option(other))
+      ctx->set_option(other, false);
+  }
+  enforcing_input_type_ = false;
 }
 
 void ConcreteEngine::OnPropertyUpdate(Context* ctx, const string& property) {
@@ -615,6 +670,17 @@ void ConcreteEngine::InitializeComponents() {
 
 void ConcreteEngine::InitializeOptions() {
   LOG(INFO) << "ConcreteEngine::InitializeOptions";
+  LoadInputTypes();
+  if (!input_type_options_.empty()) {
+    for (const auto& option : input_type_options_)
+      context_->set_option(option, false);
+    string reset = input_type_reset_;
+    if (std::find(input_type_options_.begin(), input_type_options_.end(),
+                  reset) == input_type_options_.end()) {
+      reset = input_type_options_.front();
+    }
+    context_->set_option(reset, true);
+  }
   // reset custom switches
   Config* config = schema_->config();
   Switches switches(config);

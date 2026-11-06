@@ -101,12 +101,15 @@ class Dictionary : public Class<Dictionary, const Ticket&> {
   const vector<of<Table>>& tables() const { return tables_; }
   const an<Table>& primary_table() const { return tables_[0]; }
   const an<Prism>& prism() const { return prism_; }
+  bool AddPrism(const string& name, const an<Prism>& prism);
+  bool SetPrism(const string& name);
 
  private:
   string name_;
   vector<string> packs_;
   vector<of<Table>> tables_;
   an<Prism> prism_;
+  map<string, an<Prism>> prisms_;
 };
 
 class ResourceResolver;

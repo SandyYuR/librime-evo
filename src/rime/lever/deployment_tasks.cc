@@ -375,40 +375,146 @@ bool SchemaUpdate::Run(Deployer* deployer) {
     }
   };
 
-  string dict_name;
-  if (!config->GetString("translator/dictionary", &dict_name)) {
-    // not requiring a dictionary
-    compile_rewriter();
-    return true;
-  }
-  Schema schema(schema_id, config.release());
-  the<Dictionary> dict(
-      Dictionary::Require("dictionary")->Create({&schema, "translator"}));
-  if (!dict) {
-    LOG(ERROR) << "Error creating dictionary '" << dict_name << "'.";
-    return false;
-  }
-
-  LOG(INFO) << "preparing dictionary '" << dict_name << "'.";
-  const path& user_data_path(deployer->user_data_dir);
-  if (!MaybeCreateDirectory(deployer->staging_dir)) {
-    return false;
-  }
-  DictCompiler dict_compiler(dict.get());
-  if (verbose_) {
-    dict_compiler.set_options(DictCompiler::kRebuild | DictCompiler::kDump);
-  }
   the<ResourceResolver> resolver(
       Service::instance().CreateDeployedResourceResolver(
           {"compiled_schema", "", ".schema.yaml"}));
   auto compiled_schema = resolver->ResolvePath(schema_id);
-  if (!dict_compiler.Compile(compiled_schema)) {
-    LOG(ERROR) << "dictionary '" << dict_name << "' failed to compile.";
+  if (!MaybeCreateDirectory(deployer->staging_dir)) {
     return false;
   }
-  LOG(INFO) << "dictionary '" << dict_name << "' is ready.";
+
+  Schema schema(schema_id, config.release());
+  Config* schema_config = schema.config();
+
+  vector<string> translator_namespaces;
+  if (auto translators = schema_config->GetList("engine/translators")) {
+    for (const auto& item : *translators) {
+      string prescription;
+      if (auto value = As<ConfigValue>(item)) {
+        prescription = value->str();
+      } else if (auto map = As<ConfigMap>(item)) {
+        if (auto name = map->GetValue("name"))
+          prescription = name->str();
+      }
+      const auto at = prescription.find('@');
+      const string component = prescription.substr(0, at);
+      if (component != "script_translator" && component != "r10n_translator")
+        continue;
+      string name_space =
+          at == string::npos ? "translator" : prescription.substr(at + 1);
+      if (name_space.empty())
+        continue;
+      if (std::find(translator_namespaces.begin(), translator_namespaces.end(),
+                    name_space) == translator_namespaces.end()) {
+        translator_namespaces.push_back(std::move(name_space));
+      }
+    }
+  }
+  if (translator_namespaces.empty()) {
+    string dict_name;
+    if (schema_config->GetString("translator/dictionary", &dict_name))
+      translator_namespaces.push_back("translator");
+  }
+
+  auto dictionary_component = Dictionary::Require("dictionary");
+  bool has_dictionary = false;
+  bool success = true;
+  map<string, pair<string, string>> prism_owners;
+  for (const auto& name_space : translator_namespaces) {
+    string dict_name;
+    if (!schema_config->GetString(name_space + "/dictionary", &dict_name) &&
+        !schema_config->GetString("speller/dictionary", &dict_name))
+      continue;
+    has_dictionary = true;
+    vector<pair<string, string>> prism_specs;
+    auto prisms = schema_config->GetList(name_space + "/prisms");
+    const bool has_prism_list = bool(prisms);
+    if (prisms) {
+      for (const auto& item : *prisms) {
+        auto map = As<ConfigMap>(item);
+        if (!map)
+          continue;
+        string prism_name;
+        string option;
+        auto name_value = map->GetValue("name");
+        auto option_value = map->GetValue("option");
+        if (!name_value || !option_value ||
+            !name_value->GetString(&prism_name) ||
+            !option_value->GetString(&option) || prism_name.empty() ||
+            option.empty()) {
+          LOG(ERROR) << name_space << "/prisms entries require name and "
+                     << "option";
+          success = false;
+          continue;
+        }
+        prism_specs.emplace_back(std::move(prism_name), std::move(option));
+      }
+    }
+    if (prism_specs.empty()) {
+      string prism_name;
+      if (!schema_config->GetString(name_space + "/prism", &prism_name) ||
+          prism_name.empty()) {
+        prism_name = dict_name;
+      }
+      prism_specs.emplace_back(std::move(prism_name), name_space);
+    }
+    the<Dictionary> dict(dictionary_component->Create({&schema, name_space}));
+    if (!dict) {
+      LOG(ERROR) << "Error creating dictionary '" << dict_name << "' for '"
+                 << name_space << "'.";
+      success = false;
+      continue;
+    }
+
+    for (const auto& prism_spec : prism_specs) {
+      const string& prism_name = prism_spec.first;
+      auto prism_owner = prism_owners.find(prism_name);
+      if (prism_owner != prism_owners.end()) {
+        if (prism_owner->second.first == dict_name) {
+          LOG(INFO) << "translator namespace '" << name_space
+                    << "' reuses prism '" << prism_name << "' from '"
+                    << prism_owner->second.second << "'.";
+          continue;
+        }
+        LOG(ERROR) << "translator namespaces '" << prism_owner->second.second
+                   << "' and '" << name_space << "' use prism '" << prism_name
+                   << "' with different dictionaries; configure a distinct "
+                      "prism";
+        success = false;
+        continue;
+      }
+      if (!dict->SetPrism(prism_name)) {
+        LOG(ERROR) << "dictionary '" << dict_name
+                   << "' has no configured prism '" << prism_name << "'.";
+        success = false;
+        continue;
+      }
+      prism_owners.emplace(prism_name, std::make_pair(dict_name, name_space));
+      LOG(INFO) << "preparing dictionary '" << dict_name << "' for '"
+                << name_space << "' with prism '" << prism_name << "'.";
+      DictCompiler dict_compiler(dict.get());
+      dict_compiler.set_translator_namespace(name_space);
+      dict_compiler.set_input_type(has_prism_list ? prism_name : name_space);
+      string auxiliary_type;
+      if (schema_config->GetString(name_space + "/aux", &auxiliary_type))
+        dict_compiler.set_auxiliary_type(std::move(auxiliary_type));
+      if (verbose_) {
+        dict_compiler.set_options(DictCompiler::kRebuild | DictCompiler::kDump);
+      }
+      if (!dict_compiler.Compile(compiled_schema)) {
+        LOG(ERROR) << "dictionary '" << dict_name << "' for '" << name_space
+                   << "' failed to compile prism '" << prism_name << "'.";
+        success = false;
+        continue;
+      }
+      LOG(INFO) << "dictionary '" << dict_name << "' for '" << name_space
+                << "' prism '" << prism_name << "' is ready.";
+    }
+  }
+  if (!has_dictionary)
+    success = true;
   compile_rewriter();
-  return true;
+  return success;
 }
 
 ConfigFileUpdate::ConfigFileUpdate(TaskInitializer arg) {

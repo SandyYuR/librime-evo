@@ -33,7 +33,7 @@ int main(int argc, char* argv[]) {
               << "\t-l|--list" << std::endl
               << "\t-s|--sync" << std::endl
               << "\t-b|--backup dict_name" << std::endl
-              << "\t-r|--restore xxx.userdb.txt" << std::endl
+              << "\t-r|--restore xxx.tsv" << std::endl
               << "\t-e|--export dict_name export.txt" << std::endl
               << "\t-i|--import dict_name import.txt" << std::endl;
     SetConsoleOutputCodePage(codepage);
@@ -56,7 +56,11 @@ int main(int argc, char* argv[]) {
   UserDictManager mgr(&deployer);
   if (argc == 2 && (option == "-l" || option == "--list")) {
     UserDictList list;
-    mgr.GetUserDictList(&list);
+    if (!mgr.GetUserDictList(&list)) {
+      std::cerr << "failed to enumerate user dictionaries." << std::endl;
+      SetConsoleOutputCodePage(codepage);
+      return 1;
+    }
     if (list.empty()) {
       std::cerr << "no user dictionary is found." << std::endl;
       SetConsoleOutputCodePage(codepage);

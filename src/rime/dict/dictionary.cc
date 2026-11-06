@@ -295,6 +295,21 @@ Dictionary::~Dictionary() {
   // should not close shared table and prism objects
 }
 
+bool Dictionary::AddPrism(const string& name, const an<Prism>& prism) {
+  if (name.empty() || !prism)
+    return false;
+  prisms_[name] = prism;
+  return true;
+}
+
+bool Dictionary::SetPrism(const string& name) {
+  auto it = prisms_.find(name);
+  if (it == prisms_.end() || !it->second)
+    return false;
+  prism_ = it->second;
+  return true;
+}
+
 static void lookup_table(Table* table,
                          DictEntryCollector* collector,
                          const SyllableGraph& syllable_graph,
@@ -504,16 +519,28 @@ Dictionary* DictionaryComponent::Create(const Ticket& ticket) {
     return nullptr;
   Config* config = ticket.schema->config();
   string dict_name;
-  if (!config->GetString(ticket.name_space + "/dictionary", &dict_name)) {
-    LOG(ERROR) << ticket.name_space << "/dictionary not specified in schema '"
-               << ticket.schema->schema_id() << "'.";
+  if (!config->GetString(ticket.name_space + "/dictionary", &dict_name) &&
+      !config->GetString("speller/dictionary", &dict_name)) {
+    LOG(ERROR) << "dictionary not specified for " << ticket.name_space
+               << " in schema '" << ticket.schema->schema_id() << "'.";
     return nullptr;
   }
   if (dict_name.empty()) {
     return nullptr;  // not requiring static dictionary
   }
   string prism_name;
-  if (!config->GetString(ticket.name_space + "/prism", &prism_name)) {
+  auto prism_list = config->GetList(ticket.name_space + "/prisms");
+  if (!config->GetString(ticket.name_space + "/prism", &prism_name) &&
+      prism_list) {
+    for (const auto& item : *prism_list) {
+      auto map = As<ConfigMap>(item);
+      if (map && map->GetValue("name") &&
+          map->GetValue("name")->GetString(&prism_name)) {
+        break;
+      }
+    }
+  }
+  if (prism_name.empty()) {
     prism_name = dict_name;
   }
   vector<string> packs;
@@ -524,7 +551,27 @@ Dictionary* DictionaryComponent::Create(const Ticket& ticket) {
       }
     }
   }
-  return Create(std::move(dict_name), std::move(prism_name), std::move(packs));
+  const string primary_prism_name = prism_name;
+  auto dictionary =
+      Create(std::move(dict_name), std::move(prism_name), std::move(packs));
+  if (!dictionary || !prism_list)
+    return dictionary;
+  for (const auto& item : *prism_list) {
+    auto map = As<ConfigMap>(item);
+    string name;
+    if (!map || !map->GetValue("name") ||
+        !map->GetValue("name")->GetString(&name) || name.empty() ||
+        name == primary_prism_name) {
+      continue;
+    }
+    auto prism = prism_map_[name].lock();
+    if (!prism) {
+      auto file_path = prism_resource_resolver_->ResolvePath(name);
+      prism_map_[name] = prism = New<Prism>(file_path);
+    }
+    dictionary->AddPrism(name, prism);
+  }
+  return dictionary;
 }
 
 Dictionary* DictionaryComponent::Create(string dict_name,
@@ -550,8 +597,10 @@ Dictionary* DictionaryComponent::Create(string dict_name,
     }
     tables.push_back(std::move(table));
   }
-  return new Dictionary(std::move(dict_name), std::move(packs),
-                        std::move(tables), std::move(prism));
+  auto dictionary = new Dictionary(std::move(dict_name), std::move(packs),
+                                   std::move(tables), std::move(prism));
+  dictionary->AddPrism(prism_name, dictionary->prism());
+  return dictionary;
 }
 
 }  // namespace rime

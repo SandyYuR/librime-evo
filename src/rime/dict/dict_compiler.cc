@@ -33,7 +33,52 @@ static bool IsAsciiPrismKey(const string& key);
 static ReverseLookupTable ReadAuxiliarySources(const vector<path>& files);
 static ReverseLookupTable BuildAuxiliaryReverseLookup(
     const path& schema_file,
-    const vector<path>& files);
+    const vector<path>& files,
+    const string& translator_namespace,
+    const string& auxiliary_type);
+
+static bool get_speller_algebra(Config& config,
+                                const string& path,
+                                an<ConfigList>* algebra,
+                                const string& group_name = {}) {
+  *algebra = config.GetList(path);
+  if (*algebra)
+    return true;
+
+  auto groups = config.GetMap(path);
+  if (!groups)
+    return true;
+
+  if (group_name.empty()) {
+    LOG(ERROR) << path << " contains named groups but no group was selected";
+    return false;
+  }
+  string selected_group = group_name;
+  if (selected_group == "auto") {
+    auto it = groups->begin();
+    if (it == groups->end()) {
+      LOG(ERROR) << path << " contains no named groups";
+      return false;
+    }
+    auto next = it;
+    ++next;
+    if (next != groups->end()) {
+      LOG(ERROR) << path
+                 << " has multiple named groups; selector 'auto' is "
+                    "ambiguous";
+      return false;
+    }
+    selected_group = it->first;
+  }
+  *algebra = As<ConfigList>(groups->Get(selected_group));
+  if (!*algebra) {
+    LOG(ERROR) << path << " group '" << selected_group
+               << "' is missing or "
+                  "not a list";
+    return false;
+  }
+  return true;
+}
 
 DictCompiler::DictCompiler(Dictionary* dictionary)
     : dict_name_(dictionary->name()),
@@ -74,37 +119,26 @@ static bool get_dict_files_from_settings(vector<path>* dict_files,
 
 static bool get_auxiliary_file_from_schema(vector<path>* auxiliary_files,
                                            const path& schema_file,
-                                           ResourceResolver* source_resolver) {
-  if (schema_file.empty())
+                                           ResourceResolver* source_resolver,
+                                           bool enabled) {
+  if (schema_file.empty() || !enabled)
     return true;
   Config schema;
   if (!schema.LoadFromFile(schema_file)) {
-    LOG(ERROR) << "failed to load schema while resolving translator/aux.";
+    LOG(ERROR)
+        << "failed to load schema while resolving speller/aux_dictionary.";
     return false;
   }
   string name;
-  if (!schema.GetString("translator/aux", &name) || name.empty())
+  if (!schema.GetString("speller/aux_dictionary", &name) || name.empty())
     return true;
 
-  // A bare name is resolved in the normal user/shared Rime resource paths.
-  // The plain .txt form is preferred so the AUX table needs no YAML header;
-  // .yaml and .dict.yaml remain accepted for existing data files.
-  vector<string> candidates;
-  if (boost::iends_with(name, ".dict.yaml") ||
-      boost::iends_with(name, ".yaml") || boost::iends_with(name, ".txt")) {
-    candidates.push_back(name);
-  } else {
-    candidates.push_back(name + ".txt");
-    candidates.push_back(name + ".yaml");
-    candidates.push_back(name + ".dict.yaml");
-    candidates.push_back(name);
-  }
-  for (const auto& candidate : candidates) {
-    auto file = source_resolver->ResolvePath(candidate);
-    if (std::filesystem::exists(file)) {
-      auxiliary_files->push_back(file);
-      return true;
-    }
+  if (!boost::iends_with(name, ".yaml"))
+    name += ".yaml";
+  auto file = source_resolver->ResolvePath(name);
+  if (std::filesystem::exists(file)) {
+    auxiliary_files->push_back(file);
+    return true;
   }
   LOG(ERROR) << "auxiliary source '" << name << "' does not exist.";
   return false;
@@ -145,14 +179,15 @@ bool DictCompiler::Compile(const path& schema_file) {
   }
   vector<path> auxiliary_files;
   if (!get_auxiliary_file_from_schema(&auxiliary_files, schema_file,
-                                      source_resolver_.get())) {
+                                      source_resolver_.get(),
+                                      !auxiliary_type_.empty())) {
     return false;
   }
   const bool aux_active = !auxiliary_files.empty();
   ReverseLookupTable auxiliary_reverse;
   if (aux_active) {
-    auxiliary_reverse =
-        BuildAuxiliaryReverseLookup(schema_file, auxiliary_files);
+    auxiliary_reverse = BuildAuxiliaryReverseLookup(
+        schema_file, auxiliary_files, translator_namespace_, auxiliary_type_);
   }
   uint32_t schema_file_checksum =
       schema_file.empty() ? 0 : Checksum(schema_file);
@@ -458,7 +493,9 @@ static ReverseLookupTable ReadAuxiliarySources(const vector<path>& files) {
 
 static ReverseLookupTable BuildAuxiliaryReverseLookup(
     const path& schema_file,
-    const vector<path>& files) {
+    const vector<path>& files,
+    const string& translator_namespace,
+    const string& auxiliary_type) {
   ReverseLookupTable result;
   if (schema_file.empty() || files.empty())
     return result;
@@ -466,10 +503,13 @@ static ReverseLookupTable BuildAuxiliaryReverseLookup(
   Config schema;
   if (!schema.LoadFromFile(schema_file))
     return result;
-  auto aux_algebra = schema.GetList("speller/aux_algebra");
-  if (!aux_algebra)
+  string aux_path = translator_namespace + "/aux_algebra";
+  if (schema.IsNull(aux_path))
+    aux_path = "speller/aux_algebra";
+  an<ConfigList> aux_algebra;
+  if (!get_speller_algebra(schema, aux_path, &aux_algebra, auxiliary_type) ||
+      !aux_algebra)
     return result;
-
   Projection projection;
   if (!projection.Load(aux_algebra))
     return result;
@@ -521,12 +561,19 @@ bool DictCompiler::BuildPrism(const path& schema_file,
     }
     Projection p;
     Projection aux_projection;
-    auto algebra = config.GetList("speller/algebra");
-    // translator/aux only names the AUX source file.  AUX is enabled only
-    // when speller/aux_algebra is present.
+    an<ConfigList> algebra;
+    string algebra_path = translator_namespace_ + "/algebra";
+    if (config.IsNull(algebra_path))
+      algebra_path = "speller/algebra";
+    if (!get_speller_algebra(config, algebra_path, &algebra, input_type_))
+      return false;
     an<ConfigList> aux_algebra;
     if (auxiliary_files) {
-      aux_algebra = config.GetList("speller/aux_algebra");
+      string aux_path = translator_namespace_ + "/aux_algebra";
+      if (config.IsNull(aux_path))
+        aux_path = "speller/aux_algebra";
+      if (!get_speller_algebra(config, aux_path, &aux_algebra, auxiliary_type_))
+        return false;
       aux_enabled = static_cast<bool>(aux_algebra);
     }
     if (algebra) {

@@ -48,6 +48,7 @@ class ScriptTranslator : public Translator,
   bool ConcatenatePhrases(CommitEntry& commit_entry,
                           const vector<an<Phrase>>& phrases);
   bool SaveCommitEntry(CommitEntry& commit_entry);
+  bool SelectPrism();
 
   // options
   int max_homophones() const { return max_homophones_; }
@@ -78,6 +79,12 @@ class ScriptTranslator : public Translator,
   string auxiliary_suffix_trigger_ = "`";
   bool auxiliary_mode_ = false;
   string auxiliary_option_;
+  struct PrismSelection {
+    string name;
+    string option;
+  };
+  vector<PrismSelection> prism_selections_;
+  string active_prism_;
   the<Poet> poet_;
   vector<an<Phrase>> queue_;
 };
