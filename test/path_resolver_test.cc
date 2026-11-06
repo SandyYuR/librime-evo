@@ -24,11 +24,15 @@ class SafePathTest : public ::testing::Test {
     }
     ASSERT_TRUE(fs::is_directory(root_));
     fs::create_directory(root_ / "data");
-    std::ofstream(root_ / "data" / "source.txt") << "text";
+    std::ofstream(static_cast<const std::filesystem::path&>(root_ / "data" /
+                                                            "source.txt"))
+        << "text";
     outside_ = root_;
     outside_ += "-outside";
     fs::create_directories(outside_);
-    std::ofstream(outside_ / "secret.txt") << "secret";
+    std::ofstream(
+        static_cast<const std::filesystem::path&>(outside_ / "secret.txt"))
+        << "secret";
   }
   void TearDown() override {
     std::error_code ec;

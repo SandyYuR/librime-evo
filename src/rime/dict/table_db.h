@@ -15,7 +15,7 @@ class TableDb : public TextDb {
  public:
   TableDb(const path& file_path, const string& db_name);
 
-  static const TextFormat format;
+  RIME_DLL static const TextFormat format;
 };
 
 // read-only tabledb

@@ -286,7 +286,8 @@ bool UserDictManager::Restore(const path& snapshot_file) {
 namespace {
 int SnapshotEntryCount(const path& text_file) {
   // 直接读取头部记录数，避免重复遍历数据库。
-  std::ifstream input(text_file, std::ios::binary);
+  std::ifstream input(static_cast<const std::filesystem::path&>(text_file),
+                      std::ios::binary);
   if (!input)
     return -1;
   string line;

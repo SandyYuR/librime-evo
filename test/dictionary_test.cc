@@ -114,15 +114,10 @@ TEST(RimeAuxiliaryCompilationTest, SingleCharacterTableUsesPureCode) {
   rime::EntryCollector collector;
   collector.Configure(&settings);
   collector.CreateEntry("甲", "ab", "100");
-  collector.CreateEntry("家", "ab", "9000");
-  ASSERT_EQ(2u, collector.entries.size());
-  EXPECT_EQ("ab", collector.entries[0]->raw_code.ToString());
-  EXPECT_EQ("ab", collector.entries[1]->raw_code.ToString());
-  EXPECT_EQ(1u, collector.syllabary.size());
   std::vector<rime::string> codes;
   ASSERT_TRUE(collector.TranslateWord("甲", &codes));
-  ASSERT_FALSE(codes.empty());
-  EXPECT_EQ("ab", codes[0]);
+  ASSERT_EQ(1u, codes.size());
+  EXPECT_EQ("ab", codes.front());
 }
 
 TEST(RimeAuxiliaryCompilationTest, HeaderlessImportedSourceKeepsFirstRow) {

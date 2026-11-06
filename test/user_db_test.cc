@@ -277,70 +277,69 @@ TEST(RimeUserDbStateTest, CanonicalSnapshotOnly) {
   const std::string row = "cè shì\t侧室\t2,1.5,8,2,5\n";
   size_t count = 0;
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << metadata << "#@/record_count\t1\n" << row;
   }
   EXPECT_TRUE(userdb_tsv::ValidateSnapshot(file, &count));
   EXPECT_EQ(1u, count);
-  // 未发布格式固定为 userdb-v1。
   {
     std::string unsupported = metadata;
     const auto pos = unsupported.find("userdb-v1");
     ASSERT_NE(std::string::npos, pos);
     unsupported.replace(pos, std::string("userdb-v1").size(), "userdb-v3");
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << unsupported << "#@/record_count\t1\n" << row;
   }
   EXPECT_FALSE(userdb_tsv::ValidateSnapshot(file, &count));  // duplicate tick
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << metadata << "#@/record_count\t2\n" << row;
   }
   EXPECT_FALSE(userdb_tsv::ValidateSnapshot(file, &count));
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << metadata << row << "#@/record_count\t1\n";
   }
   EXPECT_FALSE(userdb_tsv::ValidateSnapshot(file, &count));
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << metadata << "#@/record_count\t1\n#@/record_count\t1\n"
         << row;
   }
   EXPECT_FALSE(userdb_tsv::ValidateSnapshot(file, &count));
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << "# sync_complete\t1\n"
         << metadata << "#@/record_count\t1\n"
         << row;
   }
   EXPECT_FALSE(userdb_tsv::ValidateSnapshot(file, &count));
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << metadata << "#@/record_count\t1\n#@/tick\t0\n" << row;
   }
   EXPECT_FALSE(userdb_tsv::ValidateSnapshot(file, &count));
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << metadata
         << "#@/record_count\t1\n#@/manual_clock\t58006561152\n"
         << row;
   }
   EXPECT_FALSE(userdb_tsv::ValidateSnapshot(file, &count));  // duplicated clock
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << metadata << "#@/record_count\t1\n#@/db_name\tzc\n" << row;
   }
   EXPECT_FALSE(userdb_tsv::ValidateSnapshot(file, &count));  // duplicate name
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << metadata << "#@/record_count\t1\n#@/new_meta\tretained\n"
         << row;
   }
   EXPECT_TRUE(userdb_tsv::ValidateSnapshot(
       file, &count));  // real DB metadata is allowed
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << "#@/db_name\tother\n"
         << metadata.substr(metadata.find("#@/rime_version"))
         << "#@/record_count\t1\n"
@@ -348,7 +347,7 @@ TEST(RimeUserDbStateTest, CanonicalSnapshotOnly) {
   }
   EXPECT_FALSE(userdb_tsv::ValidateSnapshot(file, &count));  // name mismatch
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << "#@/db_name\tzc\n"
         << metadata.substr(metadata.find("#@/db_type"))
         << "#@/record_count\t1\n"
@@ -357,7 +356,7 @@ TEST(RimeUserDbStateTest, CanonicalSnapshotOnly) {
   EXPECT_FALSE(
       userdb_tsv::ValidateSnapshot(file, &count));  // missing rime_version
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << metadata
         << "#@/record_count\t1\n#@/file_name\tzc.userdb.tsv\n"
         << row;
@@ -365,7 +364,7 @@ TEST(RimeUserDbStateTest, CanonicalSnapshotOnly) {
   EXPECT_FALSE(
       userdb_tsv::ValidateSnapshot(file, &count));  // reserved metadata
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header
         << "#@/db_type\tuserdb\n#@/user_id\ttest\n#@/"
            "userdb_format\tuserdb-v1\n#@/record_count\t1\n"
@@ -373,7 +372,7 @@ TEST(RimeUserDbStateTest, CanonicalSnapshotOnly) {
   }
   EXPECT_FALSE(userdb_tsv::ValidateSnapshot(file, &count));  // missing clock
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header
         << "#@/db_type\tuserdb\n#@/user_id\ttest\n#@/"
            "userdb_format\tuserdb-v1\n#@/manual_clock\t1\n#@/record_count\t1\n"
@@ -382,7 +381,7 @@ TEST(RimeUserDbStateTest, CanonicalSnapshotOnly) {
   EXPECT_FALSE(
       userdb_tsv::ValidateSnapshot(file, &count));  // clock < row revision
   {
-    std::ofstream out(file);
+    std::ofstream out(static_cast<const std::filesystem::path&>(file));
     out << header << metadata << "#@/record_count\t1\n"
         << "cè shì\t侧室\t2,1.5,8,-1,5\n";
   }
