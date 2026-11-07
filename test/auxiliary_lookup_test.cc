@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <filesystem>
 #include <gtest/gtest.h>
+#include <rime/config.h>
 #include <rime/algo/syllabifier.h>
 #include <rime/dict/auxiliary_db.h>
 #include <rime/dict/dict_compiler.h>
@@ -80,13 +82,15 @@ sort: by_weight
       - "aux|^weak$|xy|abbrev"
       - "aux|^norm$|xy|"
     aux_path_other:
-      - "aux|^([a-z]{2,})$|$1|"
+      - "aux|^([a-z])[a-z]*$|$1|"
+      - "aux|^([a-z]{2,})$|$1/|"
 )YAML";
+    ASSERT_TRUE(
+        DictCompiler::CompileAuxiliary(path{"aux_path_test.schema.yaml"}));
     for (const string type : {"pinyin", "zrm"}) {
       auto dict = OpenDictionary(type, false);
       DictCompiler compiler(dict.get());
       compiler.set_input_type(type);
-      compiler.set_auxiliary_type("aux_path_test");
       ASSERT_TRUE(compiler.Compile(path{"aux_path_test.schema.yaml"}));
     }
     database_.reset(new AuxiliaryDb(path{"aux_path_test.aux.bin"}));
@@ -100,7 +104,7 @@ sort: by_weight
           "aux_path_test.schema.yaml", "aux_path_test.table.bin",
           "aux_path_test.reverse.bin", "aux_path_test_pinyin.prism.bin",
           "aux_path_test_zrm.prism.bin", "aux_path_test.aux.bin",
-          "aux_path_other.aux.bin", "aux_path_user.txt"})
+          "aux_path_other.aux.bin", "auto.aux.bin", "aux_path_user.txt"})
       std::remove(file);
   }
 
@@ -155,6 +159,79 @@ sort: by_weight
 
   the<AuxiliaryDb> database_;
 };
+
+TEST_F(RimeAuxiliaryLookupTest,
+       CompilesEveryDeclaredGroupWithoutTranslatorSelection) {
+  vector<AuxiliaryCharacter> characters;
+  ASSERT_TRUE(database_->Lookup("rx", &characters));
+  ASSERT_EQ(1u, characters.size());
+  EXPECT_EQ(kAbbreviation, characters.front().type);
+
+  AuxiliaryDb other(path{"aux_path_other.aux.bin"});
+  ASSERT_TRUE(other.Load());
+  EXPECT_FALSE(other.Lookup("rx", &characters));
+  ASSERT_TRUE(other.Lookup("rx/", &characters));
+  ASSERT_EQ(1u, characters.size());
+  EXPECT_EQ("你", characters.front().text);
+  EXPECT_EQ(kNormalSpelling, characters.front().type);
+  vector<AuxiliaryCode> codes;
+  ASSERT_TRUE(other.ReverseLookup("你", &codes));
+  EXPECT_FALSE(std::any_of(codes.begin(), codes.end(),
+                           [](const auto& code) { return code.code == "rx"; }));
+}
+
+TEST_F(RimeAuxiliaryLookupTest, RebuildsOnlyTheChangedGroup) {
+  const path direct_path{"aux_path_test.aux.bin"};
+  const auto direct_time = std::filesystem::last_write_time(direct_path);
+  AuxiliaryDb other(path{"aux_path_other.aux.bin"});
+  ASSERT_TRUE(other.Load());
+  const auto original_checksum = other.checksum();
+  other.Close();
+
+  Config schema;
+  ASSERT_TRUE(schema.LoadFromFile(path{"aux_path_test.schema.yaml"}));
+  auto rules = schema.GetList("speller/aux_algebra/aux_path_other");
+  ASSERT_TRUE(rules);
+  ASSERT_TRUE(rules->Append(New<ConfigValue>("aux|^([a-z]{2,})$|$1|")));
+  ASSERT_TRUE(schema.SaveToFile(path{"aux_path_test.schema.yaml"}));
+  ASSERT_TRUE(
+      DictCompiler::CompileAuxiliary(path{"aux_path_test.schema.yaml"}));
+  EXPECT_EQ(direct_time, std::filesystem::last_write_time(direct_path));
+  ASSERT_TRUE(other.Load());
+  EXPECT_NE(original_checksum, other.checksum());
+  vector<AuxiliaryCharacter> characters;
+  ASSERT_TRUE(other.Lookup("rx", &characters));
+  ASSERT_EQ(1u, characters.size());
+  EXPECT_EQ(kNormalSpelling, characters.front().type);
+  ASSERT_TRUE(database_->Lookup("rx", &characters));
+  ASSERT_EQ(1u, characters.size());
+  EXPECT_EQ(kAbbreviation, characters.front().type);
+}
+
+TEST_F(RimeAuxiliaryLookupTest, FlatRulesCompileAsAutoGroup) {
+  Config schema;
+  ASSERT_TRUE(schema.LoadFromFile(path{"aux_path_test.schema.yaml"}));
+  auto rules = schema.GetList("speller/aux_algebra/aux_path_other");
+  ASSERT_TRUE(rules);
+  ASSERT_TRUE(schema.SetItem("speller/aux_algebra", rules));
+  ASSERT_TRUE(schema.SaveToFile(path{"aux_path_test.schema.yaml"}));
+  ASSERT_TRUE(
+      DictCompiler::CompileAuxiliary(path{"aux_path_test.schema.yaml"}));
+  AuxiliaryDb database(path{"auto.aux.bin"});
+  ASSERT_TRUE(database.Load());
+  vector<AuxiliaryCharacter> characters;
+  EXPECT_TRUE(database.Lookup("rx/", &characters));
+  EXPECT_FALSE(database.Lookup("rx", &characters));
+}
+
+TEST_F(RimeAuxiliaryLookupTest, NoRulesDoNotReadAuxiliarySource) {
+  Config schema;
+  ASSERT_TRUE(
+      schema.SetString("speller/aux_dictionary", "nonexistent_aux_source"));
+  ASSERT_TRUE(schema.SaveToFile(path{"aux_path_test.schema.yaml"}));
+  EXPECT_TRUE(
+      DictCompiler::CompileAuxiliary(path{"aux_path_test.schema.yaml"}));
+}
 
 TEST_F(RimeAuxiliaryLookupTest, KeepsOrdinaryPrefixCandidates) {
   const auto entries = Lookup("nihk");

@@ -32,10 +32,8 @@ namespace rime {
 
 static bool IsAsciiPrismKey(const string& key);
 static ReverseLookupTable ReadAuxiliarySources(const vector<path>& files);
-static bool BuildAuxiliaryDatabase(const path& schema_file,
-                                   const vector<path>& files,
-                                   const string& translator_namespace,
-                                   const string& auxiliary_type,
+static bool BuildAuxiliaryDatabase(const ReverseLookupTable& sources,
+                                   an<ConfigList> algebra,
                                    const path& target,
                                    uint32_t checksum);
 
@@ -119,33 +117,6 @@ static bool get_dict_files_from_settings(vector<path>* dict_files,
   return true;
 }
 
-static bool get_auxiliary_file_from_schema(vector<path>* auxiliary_files,
-                                           const path& schema_file,
-                                           ResourceResolver* source_resolver,
-                                           bool enabled) {
-  if (schema_file.empty() || !enabled)
-    return true;
-  Config schema;
-  if (!schema.LoadFromFile(schema_file)) {
-    LOG(ERROR)
-        << "failed to load schema while resolving speller/aux_dictionary.";
-    return false;
-  }
-  string name;
-  if (!schema.GetString("speller/aux_dictionary", &name) || name.empty())
-    return true;
-
-  if (!boost::iends_with(name, ".yaml"))
-    name += ".yaml";
-  auto file = source_resolver->ResolvePath(name);
-  if (std::filesystem::exists(file)) {
-    auxiliary_files->push_back(file);
-    return true;
-  }
-  LOG(ERROR) << "auxiliary source '" << name << "' does not exist.";
-  return false;
-}
-
 static uint32_t compute_dict_file_checksum(uint32_t initial_checksum,
                                            const vector<path>& dict_files,
                                            DictSettings& settings) {
@@ -179,37 +150,10 @@ bool DictCompiler::Compile(const path& schema_file) {
                                     source_resolver_.get())) {
     return false;
   }
-  vector<path> auxiliary_files;
-  if (!get_auxiliary_file_from_schema(&auxiliary_files, schema_file,
-                                      source_resolver_.get(),
-                                      !auxiliary_type_.empty())) {
-    return false;
-  }
-  const bool aux_active = !auxiliary_files.empty();
   uint32_t schema_file_checksum =
       schema_file.empty() ? 0 : Checksum(schema_file);
   uint32_t dict_file_checksum =
       compute_dict_file_checksum(0, dict_files, settings);
-  if (aux_active) {
-    ChecksumComputer aux_checksum(schema_file_checksum);
-    for (const auto& file : auxiliary_files)
-      aux_checksum.ProcessFile(file);
-    const uint32_t auxiliary_checksum = aux_checksum.Checksum();
-    const path auxiliary_path =
-        target_resolver_->ResolvePath(auxiliary_type_ + ".aux.bin");
-    AuxiliaryDb auxiliary_db(auxiliary_path);
-    bool rebuild_auxiliary = true;
-    if (auxiliary_db.Exists() && auxiliary_db.Load()) {
-      rebuild_auxiliary = auxiliary_db.checksum() != auxiliary_checksum;
-      auxiliary_db.Close();
-    }
-    if (rebuild_auxiliary &&
-        !BuildAuxiliaryDatabase(schema_file, auxiliary_files,
-                                translator_namespace_, auxiliary_type_,
-                                auxiliary_path, auxiliary_checksum)) {
-      return false;
-    }
-  }
   bool rebuild_table = false;
   bool rebuild_prism = false;
   const auto& primary_table = tables_[0];
@@ -449,30 +393,14 @@ static ReverseLookupTable ReadAuxiliarySources(const vector<path>& files) {
   return auxiliary;
 }
 
-static bool BuildAuxiliaryDatabase(const path& schema_file,
-                                   const vector<path>& files,
-                                   const string& translator_namespace,
-                                   const string& auxiliary_type,
+static bool BuildAuxiliaryDatabase(const ReverseLookupTable& sources,
+                                   an<ConfigList> aux_algebra,
                                    const path& target,
                                    uint32_t checksum) {
-  if (schema_file.empty() || files.empty())
-    return true;
-
-  Config schema;
-  if (!schema.LoadFromFile(schema_file))
-    return false;
-  string aux_path = translator_namespace + "/aux_algebra";
-  if (schema.IsNull(aux_path))
-    aux_path = "speller/aux_algebra";
-  an<ConfigList> aux_algebra;
-  if (!get_speller_algebra(schema, aux_path, &aux_algebra, auxiliary_type) ||
-      !aux_algebra)
-    return false;
   Projection projection;
   if (!projection.Load(aux_algebra))
     return false;
   map<pair<string, string>, SpellingProperties> entries;
-  const auto sources = ReadAuxiliarySources(files);
   for (const auto& item : sources) {
     for (const auto& raw_code : item.second) {
       Script projected;
@@ -508,6 +436,82 @@ static bool BuildAuxiliaryDatabase(const path& schema_file,
   AuxiliaryDb database(target);
   database.Remove();
   return database.Build(by_character, by_code, checksum) && database.Save();
+}
+
+bool DictCompiler::CompileAuxiliary(const path& schema_file) {
+  if (schema_file.empty())
+    return true;
+  Config schema;
+  if (!schema.LoadFromFile(schema_file))
+    return false;
+
+  vector<pair<string, an<ConfigList>>> groups;
+  if (auto rules = schema.GetList("speller/aux_algebra")) {
+    groups.emplace_back("auto", rules);
+  } else if (auto named = schema.GetMap("speller/aux_algebra")) {
+    for (const auto& item : *named) {
+      auto rules = As<ConfigList>(item.second);
+      if (!rules) {
+        LOG(ERROR) << "speller/aux_algebra group '" << item.first
+                   << "' is not a list";
+        return false;
+      }
+      groups.emplace_back(item.first, rules);
+    }
+  }
+  if (groups.empty())
+    return true;
+
+  string source_name;
+  if (!schema.GetString("speller/aux_dictionary", &source_name) ||
+      source_name.empty())
+    return true;
+  if (!boost::iends_with(source_name, ".yaml"))
+    source_name += ".yaml";
+  the<ResourceResolver> source_resolver(
+      Service::instance().CreateResourceResolver({"source_file", "", ""}));
+  const auto source = source_resolver->ResolvePath(source_name);
+  if (!std::filesystem::exists(source)) {
+    LOG(ERROR) << "auxiliary source '" << source_name << "' does not exist";
+    return false;
+  }
+  const uint32_t source_checksum = Checksum(source);
+  the<ResourceResolver> target_resolver(
+      Service::instance().CreateStagingResourceResolver(
+          {"auxiliary_db", "", ".aux.bin"}));
+  ReverseLookupTable sources;
+  bool sources_loaded = false;
+  for (const auto& group : groups) {
+    // Each artifact depends only on the shared source and this group's rules.
+    boost::crc_32_type checksum(source_checksum);
+    for (const auto& item : *group.second) {
+      auto rule = As<ConfigValue>(item);
+      if (!rule) {
+        LOG(ERROR) << "speller/aux_algebra group '" << group.first
+                   << "' contains a non-string rule";
+        return false;
+      }
+      checksum.process_bytes(rule->str().c_str(), rule->str().size() + 1);
+    }
+    const auto target = target_resolver->ResolvePath(group.first);
+    AuxiliaryDb database(target);
+    if (database.Exists() && database.Load()) {
+      const bool current = database.checksum() == checksum.checksum();
+      database.Close();
+      if (current)
+        continue;
+    }
+    if (!sources_loaded) {
+      sources = ReadAuxiliarySources({source});
+      sources_loaded = true;
+    }
+    if (!BuildAuxiliaryDatabase(sources, group.second, target,
+                                checksum.checksum())) {
+      LOG(ERROR) << "failed to compile auxiliary group '" << group.first << "'";
+      return false;
+    }
+  }
+  return true;
 }
 
 bool DictCompiler::BuildPrism(const path& schema_file,

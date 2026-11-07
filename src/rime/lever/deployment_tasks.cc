@@ -382,6 +382,8 @@ bool SchemaUpdate::Run(Deployer* deployer) {
   if (!MaybeCreateDirectory(deployer->staging_dir)) {
     return false;
   }
+  if (!DictCompiler::CompileAuxiliary(compiled_schema))
+    return false;
 
   Schema schema(schema_id, config.release());
   Config* schema_config = schema.config();
@@ -494,9 +496,6 @@ bool SchemaUpdate::Run(Deployer* deployer) {
       DictCompiler dict_compiler(dict.get());
       dict_compiler.set_translator_namespace(name_space);
       dict_compiler.set_input_type(prism_name);
-      string auxiliary_type;
-      if (schema_config->GetString(name_space + "/aux", &auxiliary_type))
-        dict_compiler.set_auxiliary_type(std::move(auxiliary_type));
       if (verbose_) {
         dict_compiler.set_options(DictCompiler::kRebuild | DictCompiler::kDump);
       }

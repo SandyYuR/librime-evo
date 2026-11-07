@@ -36,12 +36,12 @@ class DictCompiler {
   RIME_DLL virtual ~DictCompiler();
 
   RIME_DLL bool Compile(const path& schema_file);
+  RIME_DLL static bool CompileAuxiliary(const path& schema_file);
   void set_options(int options) { options_ = options; }
   void set_translator_namespace(string name_space) {
     translator_namespace_ = std::move(name_space);
   }
   void set_input_type(string type) { input_type_ = std::move(type); }
-  void set_auxiliary_type(string type) { auxiliary_type_ = std::move(type); }
 
  private:
   bool BuildTable(int table_index,
@@ -65,7 +65,6 @@ class DictCompiler {
   int options_ = 0;
   string translator_namespace_ = "translator";
   string input_type_;
-  string auxiliary_type_;
   the<ResourceResolver> source_resolver_;
   the<ResourceResolver> target_resolver_;
 };
