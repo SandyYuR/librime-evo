@@ -93,6 +93,8 @@ struct Metadata {
 
 }  // namespace table
 
+struct AuxiliaryPath;
+
 class TableAccessor {
  public:
   TableAccessor() = default;
@@ -123,6 +125,12 @@ class TableAccessor {
   double credibility() const { return credibility_; }
   double quality_len() const { return quality_len_; }
   bool abbreviated_auxiliary() const { return abbreviated_auxiliary_; }
+  const std::shared_ptr<const AuxiliaryPath>& auxiliary_path() const {
+    return auxiliary_path_;
+  }
+  void set_auxiliary_path(std::shared_ptr<const AuxiliaryPath> path) {
+    auxiliary_path_ = std::move(path);
+  }
 
  private:
   Code index_code_;
@@ -133,6 +141,7 @@ class TableAccessor {
   double credibility_ = 0.0;
   double quality_len_ = 0.0;
   bool abbreviated_auxiliary_ = false;
+  std::shared_ptr<const AuxiliaryPath> auxiliary_path_;
 };
 
 using TableQueryResult = map<int, vector<TableAccessor>>;

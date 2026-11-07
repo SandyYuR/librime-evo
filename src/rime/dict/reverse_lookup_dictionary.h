@@ -48,8 +48,7 @@ class ReverseDb : public MappedFile {
              const Syllabary& syllabary,
              const Vocabulary& vocabulary,
              const ReverseLookupTable& stems,
-             uint32_t dict_file_checksum,
-             const ReverseLookupTable* auxiliary = nullptr);
+             uint32_t dict_file_checksum);
   bool Save();
 
   uint32_t dict_file_checksum() const;
@@ -68,7 +67,6 @@ class ReverseLookupDictionary
   bool Load();
   bool ReverseLookup(const string& text, string* result);
   bool LookupStems(const string& text, string* result);
-  bool LookupAuxiliary(const string& text, string* result);
   an<DictSettings> GetDictSettings();
 
  protected:

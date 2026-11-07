@@ -18,8 +18,6 @@
 
 namespace rime {
 
-using AuxiliaryCharacterMap = map<pair<string, string>, set<string>>;
-
 namespace prism {
 
 using Credibility = float;
@@ -80,8 +78,7 @@ class Prism : public MappedFile {
   RIME_DLL bool Build(const Syllabary& syllabary,
                       const Script* script = nullptr,
                       uint32_t dict_file_checksum = 0,
-                      uint32_t schema_file_checksum = 0,
-                      const AuxiliaryCharacterMap* aux_characters = nullptr);
+                      uint32_t schema_file_checksum = 0);
 
   RIME_DLL bool HasKey(std::string_view key);
   RIME_DLL bool GetValue(std::string_view key, int* value) const;
@@ -90,8 +87,6 @@ class Prism : public MappedFile {
                              vector<Match>* result,
                              size_t limit);
   SpellingAccessor QuerySpelling(SyllableId spelling_id);
-
-  bool SupportsAuxiliaryCharacters() const { return format_ >= 3.2; }
 
   RIME_DLL size_t array_size() const;
   RIME_DLL size_t max_key_length() const;

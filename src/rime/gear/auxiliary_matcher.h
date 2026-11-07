@@ -11,13 +11,12 @@
 namespace rime {
 
 class Dictionary;
-class ReverseLookupDictionary;
+class AuxiliaryDb;
 
 // Shared AUX lookup and matching logic for direct and indirect AUX input.
 class AuxiliaryMatcher {
  public:
-  AuxiliaryMatcher(Dictionary* primary,
-                   ReverseLookupDictionary* reverse = nullptr);
+  AuxiliaryMatcher(Dictionary* primary, AuxiliaryDb* database = nullptr);
 
   void Lookup(const string& input, vector<AuxGraphMatch>* result);
   bool LookupAuxiliary(const string& text, vector<string>* result);
@@ -31,9 +30,8 @@ class AuxiliaryMatcher {
                      map<pair<size_t, size_t>, bool>* memo) const;
 
   Dictionary* primary_ = nullptr;
-  ReverseLookupDictionary* reverse_ = nullptr;
-  map<string, SyllableId> main_ids_;
-  map<string, std::shared_ptr<const std::set<string>>> permitted_chars_;
+  AuxiliaryDb* database_ = nullptr;
+  map<SyllableId, std::set<string>> characters_by_syllable_;
   map<string, vector<string>> auxiliary_cache_;
 };
 

@@ -589,12 +589,18 @@ bool Table::Query(const SyllableGraph& syll_graph,
   if (!result || !index_ || start_pos >= syll_graph.interpreted_length)
     return false;
   result->clear();
-  std::queue<pair<size_t, TableQuery>> q;
+  struct QueryState {
+    size_t position;
+    TableQuery query;
+    std::shared_ptr<const AuxiliaryPath> auxiliary_path;
+  };
+  std::queue<QueryState> q;
   TableQuery initial_state(index_);
-  q.push({start_pos, initial_state});
+  q.push({start_pos, initial_state, nullptr});
   while (!q.empty()) {
-    size_t current_pos = q.front().first;
-    TableQuery query(q.front().second);
+    size_t current_pos = q.front().position;
+    TableQuery query(std::move(q.front().query));
+    auto auxiliary_path = std::move(q.front().auxiliary_path);
     q.pop();
     auto index = syll_graph.indices.find(current_pos);
     if (index == syll_graph.indices.end()) {
@@ -603,6 +609,7 @@ bool Table::Query(const SyllableGraph& syll_graph,
     if (query.level() == Code::kIndexCodeMaxLength) {
       TableAccessor accessor(query.Access(-1));
       if (!accessor.exhausted()) {
+        accessor.set_auxiliary_path(auxiliary_path);
         (*result)[current_pos].push_back(accessor);
       }
       continue;
@@ -611,6 +618,11 @@ bool Table::Query(const SyllableGraph& syll_graph,
       SyllableId syll_id = spellings.first;
       for (auto props : spellings.second) {
         size_t end_pos = props->end_pos;
+        auto path = auxiliary_path;
+        if (props->auxiliary_chars) {
+          path = std::make_shared<AuxiliaryPath>(
+              AuxiliaryPath{path, query.level(), props->auxiliary_chars});
+        }
 
         double penalty = 0.0;
         if (false) {
@@ -633,12 +645,13 @@ bool Table::Query(const SyllableGraph& syll_graph,
             query.Access(syll_id, next_credibility, delta_quality_len,
                          is_abbreviated_auxiliary);
         if (!accessor.exhausted()) {
+          accessor.set_auxiliary_path(path);
           (*result)[end_pos].push_back(accessor);
         }
         if (end_pos < syll_graph.interpreted_length &&
             query.Advance(syll_id, next_credibility, delta_quality_len,
                           current_pos, is_abbreviated_auxiliary)) {
-          q.push({end_pos, query});
+          q.push({end_pos, query, std::move(path)});
           query.Backdate();
         }
       }

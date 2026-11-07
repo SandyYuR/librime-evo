@@ -26,9 +26,6 @@ const char kReverseFormatPrefix[] = "Rime::Reverse/";
 const size_t kReverseFormatPrefixLen = sizeof(kReverseFormatPrefix) - 1;
 
 static const char* kStemKeySuffix = "\x1fstem";
-static const char* kAuxiliaryKeyPrefix =
-    "\x1f"
-    "aux";
 
 ReverseDb::ReverseDb(const path& file_path) : MappedFile(file_path) {}
 
@@ -88,8 +85,7 @@ bool ReverseDb::Build(DictSettings* settings,
                       const Syllabary& syllabary,
                       const Vocabulary& vocabulary,
                       const ReverseLookupTable& stems,
-                      uint32_t dict_file_checksum,
-                      const ReverseLookupTable* auxiliary) {
+                      uint32_t dict_file_checksum) {
   LOG(INFO) << "building reversedb...";
   ReverseLookupTable rev_table;
   int syllable_id = 0;
@@ -104,8 +100,7 @@ bool ReverseDb::Build(DictSettings* settings,
   }
   StringTableBuilder key_trie_builder;
   StringTableBuilder value_trie_builder;
-  size_t entry_count =
-      rev_table.size() + stems.size() + (auxiliary ? auxiliary->size() : 0);
+  size_t entry_count = rev_table.size() + stems.size();
   vector<StringId> key_ids(entry_count);
   vector<StringId> value_ids(entry_count);
   int i = 0;
@@ -124,17 +119,6 @@ bool ReverseDb::Build(DictSettings* settings,
     key_trie_builder.Add(key, 0.0, &key_ids[i]);
     value_trie_builder.Add(value, 0.0, &value_ids[i]);
     ++i;
-  }
-  // save auxiliary reverse lookup entries in a separate key namespace
-  if (auxiliary) {
-    for (const auto& v : *auxiliary) {
-      string key(kAuxiliaryKeyPrefix);
-      key += v.first;
-      string value(boost::algorithm::join(v.second, " "));
-      key_trie_builder.Add(key, 0.0, &key_ids[i]);
-      value_trie_builder.Add(value, 0.0, &value_ids[i]);
-      ++i;
-    }
   }
   key_trie_builder.Build();
   value_trie_builder.Build();
@@ -231,11 +215,6 @@ bool ReverseLookupDictionary::ReverseLookup(const string& text,
 
 bool ReverseLookupDictionary::LookupStems(const string& text, string* result) {
   return db_->Lookup(text + kStemKeySuffix, result);
-}
-
-bool ReverseLookupDictionary::LookupAuxiliary(const string& text,
-                                              string* result) {
-  return db_->Lookup(string(kAuxiliaryKeyPrefix) + text, result);
 }
 
 an<DictSettings> ReverseLookupDictionary::GetDictSettings() {

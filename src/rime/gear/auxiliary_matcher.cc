@@ -3,8 +3,8 @@
 // Distributed under the BSD License
 //
 #include <rime/gear/auxiliary_matcher.h>
+#include <rime/dict/auxiliary_db.h>
 #include <rime/dict/dictionary.h>
-#include <rime/dict/reverse_lookup_dictionary.h>
 #include <utf8.h>
 
 namespace rime {
@@ -21,20 +21,6 @@ static vector<string> SplitCharacters(const string& text) {
   return result;
 }
 
-static vector<string> SplitCodes(const string& text) {
-  vector<string> result;
-  size_t start = 0;
-  while (start < text.size()) {
-    size_t end = text.find(' ', start);
-    if (end == string::npos)
-      end = text.size();
-    if (end > start)
-      result.emplace_back(text.substr(start, end - start));
-    start = end + 1;
-  }
-  return result;
-}
-
 static bool MatchPrefix(const vector<string>& codes, const string& input) {
   for (const auto& code : codes) {
     if (code.compare(0, input.size(), input) == 0)
@@ -45,59 +31,62 @@ static bool MatchPrefix(const vector<string>& codes, const string& input) {
 
 }  // namespace
 
-AuxiliaryMatcher::AuxiliaryMatcher(Dictionary* primary,
-                                   ReverseLookupDictionary* reverse)
-    : primary_(primary), reverse_(reverse) {
-  if (!primary_ || !primary_->loaded())
-    return;
-  Syllabary syllables;
-  if (primary_->primary_table()->GetSyllabary(&syllables)) {
-    SyllableId id = 0;
-    for (const auto& syllable : syllables)
-      main_ids_[syllable] = id++;
-  }
-}
+AuxiliaryMatcher::AuxiliaryMatcher(Dictionary* primary, AuxiliaryDb* database)
+    : primary_(primary), database_(database) {}
 
 void AuxiliaryMatcher::Lookup(const string& input,
                               vector<AuxGraphMatch>* result) {
-  if (!primary_ || !result || input.empty())
+  if (!primary_ || !primary_->loaded() || !database_ || !result ||
+      input.empty())
     return;
   vector<Prism::Match> matches;
   primary_->prism()->CommonPrefixSearch(input, &matches);
   for (const auto& match : matches) {
+    if (match.length == input.size())
+      continue;
+    vector<pair<size_t, vector<AuxiliaryCharacter>>> suffixes;
+    database_->CommonPrefixLookup(input.substr(match.length), &suffixes);
+    if (suffixes.empty())
+      continue;
     for (auto accessor = primary_->prism()->QuerySpelling(match.value);
          !accessor.exhausted(); accessor.Next()) {
-      if (!accessor.properties().auxiliary)
+      const auto base = accessor.properties();
+      if (base.type >= kAbbreviation || base.is_correction)
         continue;
-      auto id = accessor.syllable_id();
-      const auto properties = accessor.properties();
-      const auto base_code = primary_->primary_table()->GetSyllableById(id);
-      auto base = main_ids_.find(base_code);
-      if (base == main_ids_.end())
-        continue;
-      const string& chars = accessor.properties().auxiliary_characters;
-      if (chars.empty())
-        continue;
-      auto table_words = primary_->primary_table()->QueryWords(base->second);
-      if (table_words.exhausted())
-        continue;
-      auto permitted = permitted_chars_.find(chars);
-      if (permitted == permitted_chars_.end()) {
-        std::set<string> allowed;
-        for (auto p = chars.begin(); p != chars.end();) {
-          auto begin = p;
-          utf8::next(p, chars.end());
-          allowed.emplace(begin, p);
+      const auto id = accessor.syllable_id();
+      auto cached = characters_by_syllable_.find(id);
+      if (cached == characters_by_syllable_.end()) {
+        std::set<string> characters;
+        for (const auto& table : primary_->tables()) {
+          if (!table->IsOpen())
+            continue;
+          for (auto words = table->QueryWords(id); !words.exhausted();
+               words.Next()) {
+            const string text = table->GetEntryText(*words.entry());
+            if (!text.empty() && utf8::distance(text.begin(), text.end()) == 1)
+              characters.insert(text);
+          }
         }
-        permitted =
-            permitted_chars_
-                .emplace(chars, std::make_shared<const std::set<string>>(
-                                    std::move(allowed)))
-                .first;
+        cached =
+            characters_by_syllable_.emplace(id, std::move(characters)).first;
       }
-      if (!permitted->second->empty())
-        result->push_back({match.length, base->second, permitted->second,
-                           properties.type, properties.credibility});
+      for (const auto& suffix : suffixes) {
+        // Character membership and spelling metadata belong to the same edge.
+        // Combining metadata across groups would promote abbreviated AUX hits.
+        map<pair<SpellingType, double>, std::set<string>> groups;
+        for (const auto& item : suffix.second) {
+          if (!cached->second.count(item.text))
+            continue;
+          const auto type = (std::max)(base.type, item.type);
+          groups[{type, base.credibility + item.credibility}].insert(item.text);
+        }
+        for (auto& group : groups) {
+          result->push_back({match.length + suffix.first, id,
+                             std::make_shared<const std::set<string>>(
+                                 std::move(group.second)),
+                             group.first.first, group.first.second});
+        }
+      }
     }
   }
 }
@@ -112,12 +101,12 @@ bool AuxiliaryMatcher::LookupAuxiliary(const string& text,
     *result = cached->second;
     return !result->empty();
   }
-  if (!reverse_)
+  if (!database_)
     return false;
-  string encoded;
-  const bool found = reverse_->LookupAuxiliary(text, &encoded);
-  if (found)
-    *result = SplitCodes(encoded);
+  vector<AuxiliaryCode> codes;
+  const bool found = database_->ReverseLookup(text, &codes);
+  for (const auto& code : codes)
+    result->push_back(code.code);
   auxiliary_cache_[text] = *result;
   return !result->empty();
 }

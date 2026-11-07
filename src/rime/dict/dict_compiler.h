@@ -48,18 +48,14 @@ class DictCompiler {
                   EntryCollector& collector,
                   DictSettings* settings,
                   const vector<path>& dict_files,
-                  uint32_t dict_file_checksum,
-                  const ReverseLookupTable* auxiliary_reverse = nullptr);
+                  uint32_t dict_file_checksum);
   bool BuildPrism(const path& schema_file,
                   uint32_t dict_file_checksum,
-                  uint32_t schema_file_checksum,
-                  const vector<path>* source_files,
-                  const vector<path>* auxiliary_files);
+                  uint32_t schema_file_checksum);
   bool BuildReverseDb(DictSettings* settings,
                       const EntryCollector& collector,
                       const Vocabulary& vocabulary,
-                      uint32_t dict_file_checksum,
-                      const ReverseLookupTable* auxiliary_reverse = nullptr);
+                      uint32_t dict_file_checksum);
 
   const string& dict_name_;
   const vector<string>& packs_;

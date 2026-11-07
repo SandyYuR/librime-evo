@@ -11,7 +11,6 @@
 #include <rime/translation.h>
 #include <rime/translator.h>
 #include <rime/algo/algebra.h>
-#include <rime/dict/reverse_lookup_dictionary.h>
 #include <rime/gear/memory.h>
 #include <rime/gear/translator_commons.h>
 
@@ -20,6 +19,7 @@ namespace rime {
 class Code;
 class Corrector;
 class AuxiliaryMatcher;
+class AuxiliaryDb;
 struct DictEntry;
 class Dictionary;
 class Poet;
@@ -72,11 +72,11 @@ class ScriptTranslator : public Translator,
   bool enable_correction_ = false;
   bool enable_word_completion_ = false;
   the<Projection> canonicalizer_;
-  the<Projection> auxiliary_algebra_;
   the<Corrector> corrector_;
   std::shared_ptr<AuxiliaryMatcher> auxiliary_matcher_;
-  the<ReverseLookupDictionary> auxiliary_reverse_;
+  the<AuxiliaryDb> auxiliary_db_;
   string auxiliary_suffix_trigger_ = "`";
+  string auxiliary_type_;
   bool auxiliary_mode_ = false;
   string auxiliary_option_;
   struct PrismSelection {

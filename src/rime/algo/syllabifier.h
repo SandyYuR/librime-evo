@@ -28,8 +28,9 @@ struct EdgeProperties : SpellingProperties {
   EdgeProperties() = default;
   // 切分歧義編碼段的起始位置
   set<size_t> ambiguous_source_positions;
-  bool has_normal = true;
   std::shared_ptr<const std::set<string>> auxiliary_chars;
+  // The same spelling can have ordinary and conditional AUX interpretations.
+  vector<EdgeProperties> alternatives;
 };
 
 using SpellingMap = map<SyllableId, EdgeProperties>;
@@ -49,11 +50,13 @@ struct AuxGraphMatch {
   double credibility = 0.0;
 };
 
-struct AuxiliaryConstraint {
-  size_t start = 0;
-  size_t end = 0;
-  SyllableId syllable_id = -1;
+// Only AUX edges allocate a path node; ordinary dictionary queries share null.
+struct AuxiliaryPath {
+  std::shared_ptr<const AuxiliaryPath> previous;
+  size_t character_index = 0;
   std::shared_ptr<const std::set<string>> allowed_chars;
+
+  bool Matches(const string& text) const;
 };
 
 using AuxMatchProvider =
@@ -66,7 +69,6 @@ struct SyllableGraph {
   VertexMap vertices;
   EdgeMap edges;
   SpellingIndices indices;
-  vector<AuxiliaryConstraint> auxiliary_constraints;
 };
 
 class Syllabifier {
@@ -100,16 +102,6 @@ class Syllabifier {
   Corrector* corrector_ = nullptr;
   AuxMatchProvider auxiliary_lookup_;
 };
-
-class Code;
-// Verify that there exists a full path whose AUX constraints match word
-// positions.
-RIME_DLL bool SyllableGraphMatches(const SyllableGraph& graph,
-                                   const Code& code,
-                                   const string& text,
-                                   size_t start,
-                                   size_t end,
-                                   size_t depth_limit = 0);
 
 }  // namespace rime
 

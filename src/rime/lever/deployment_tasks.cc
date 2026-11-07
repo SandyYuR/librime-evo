@@ -428,7 +428,6 @@ bool SchemaUpdate::Run(Deployer* deployer) {
     has_dictionary = true;
     vector<pair<string, string>> prism_specs;
     auto prisms = schema_config->GetList(name_space + "/prisms");
-    const bool has_prism_list = bool(prisms);
     if (prisms) {
       for (const auto& item : *prisms) {
         auto map = As<ConfigMap>(item);
@@ -494,7 +493,7 @@ bool SchemaUpdate::Run(Deployer* deployer) {
                 << name_space << "' with prism '" << prism_name << "'.";
       DictCompiler dict_compiler(dict.get());
       dict_compiler.set_translator_namespace(name_space);
-      dict_compiler.set_input_type(has_prism_list ? prism_name : name_space);
+      dict_compiler.set_input_type(prism_name);
       string auxiliary_type;
       if (schema_config->GetString(name_space + "/aux", &auxiliary_type))
         dict_compiler.set_auxiliary_type(std::move(auxiliary_type));

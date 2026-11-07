@@ -20,11 +20,13 @@
 #include <rime/language.h>
 #include <rime/schema.h>
 #include <rime/translation.h>
+#include <rime/resource.h>
+#include <rime/service.h>
 #include <rime/algo/syllabifier.h>
 #include <utf8.h>
 #include <rime/dict/corrector.h>
+#include <rime/dict/auxiliary_db.h>
 #include <rime/dict/dictionary.h>
-#include <rime/dict/reverse_lookup_dictionary.h>
 #include <rime/dict/user_dictionary.h>
 #include <rime/gear/poet.h>
 #include <rime/gear/auxiliary_matcher.h>
@@ -62,44 +64,6 @@ static vector<string> SplitCharacters(const string& text) {
   return result;
 }
 
-static an<ConfigList> get_auxiliary_algebra(Config* config,
-                                            const string& name_space) {
-  const string scoped_path = name_space + "/aux_algebra";
-  const string path =
-      config->IsNull(scoped_path) ? "speller/aux_algebra" : scoped_path;
-  if (auto rules = config->GetList(path))
-    return rules;
-  auto groups = config->GetMap(path);
-  if (!groups)
-    return nullptr;
-
-  string type;
-  if (!config->GetString(name_space + "/aux", &type) || type.empty()) {
-    return nullptr;
-  }
-  if (type == "auto") {
-    auto it = groups->begin();
-    if (it == groups->end()) {
-      LOG(ERROR) << "speller/aux_algebra contains no named groups";
-      return nullptr;
-    }
-    auto next = it;
-    ++next;
-    if (next != groups->end()) {
-      LOG(ERROR) << "speller/aux_algebra has multiple named groups; "
-                    "aux 'auto' is ambiguous";
-      return nullptr;
-    }
-    type = it->first;
-  }
-  auto rules = As<ConfigList>(groups->Get(type));
-  if (!rules) {
-    LOG(ERROR) << "speller/aux_algebra group '" << type
-               << "' is missing or not a list";
-  }
-  return rules;
-}
-
 static bool syllabify_dfs(SyllabifyTask* task,
                           size_t depth,
                           size_t current_pos) {
@@ -107,27 +71,24 @@ static bool syllabify_dfs(SyllabifyTask* task,
     return current_pos == task->target_pos;
   }
   SyllableId syllable_id = task->code.at(depth);
-  auto z = task->graph.edges.find(current_pos);
-  if (z == task->graph.edges.end())
+  auto index = task->graph.indices.find(current_pos);
+  if (index == task->graph.indices.end())
     return false;
-  // favor longer spellings
-  for (const auto& y : boost::adaptors::reverse(z->second)) {
-    size_t end_vertex_pos = y.first;
-    if (end_vertex_pos > task->target_pos)
+  auto spellings = index->second.find(syllable_id);
+  if (spellings == index->second.end())
+    return false;
+  // The spelling index lists longer interpretations first.
+  for (const auto* props : spellings->second) {
+    if (props->end_pos > task->target_pos)
       continue;
-    auto x = y.second.find(syllable_id);
-    if (x != y.second.end()) {
-      const auto& props = x->second;
-      if (!props.has_normal &&
-          (depth >= task->characters.size() ||
-           (!props.auxiliary_chars ||
-            !props.auxiliary_chars->count(task->characters[depth]))))
-        continue;
-      task->push(task, depth, current_pos, end_vertex_pos);
-      if (syllabify_dfs(task, depth + 1, end_vertex_pos))
-        return true;
-      task->pop(task, depth);
-    }
+    if (props->auxiliary_chars && !task->characters.empty() &&
+        (depth >= task->characters.size() ||
+         !props->auxiliary_chars->count(task->characters[depth])))
+      continue;
+    task->push(task, depth, current_pos, props->end_pos);
+    if (syllabify_dfs(task, depth + 1, props->end_pos))
+      return true;
+    task->pop(task, depth);
   }
   return false;
 }
@@ -147,8 +108,7 @@ class ScriptSyllabifier : public PhraseSyllabifier {
         syllabifier_(translator->delimiters(),
                      translator->enable_completion(),
                      translator->strict_spelling(),
-                     translator->canonicalizer()),
-        auxiliary_active_(bool(auxiliary)) {
+                     translator->canonicalizer()) {
     if (corrector) {
       syllabifier_.EnableCorrection(corrector);
     }
@@ -167,7 +127,6 @@ class ScriptSyllabifier : public PhraseSyllabifier {
   bool IsCorrection(const Code& code, size_t code_length) const;
 
   const SyllableGraph& syllable_graph() const { return syllable_graph_; }
-  bool auxiliary_active() const { return auxiliary_active_; }
 
  protected:
   ScriptTranslator* translator_;
@@ -175,7 +134,6 @@ class ScriptSyllabifier : public PhraseSyllabifier {
   size_t start_;
   Syllabifier syllabifier_;
   SyllableGraph syllable_graph_;
-  bool auxiliary_active_ = false;
 };
 
 class ScriptTranslation : public Translation {
@@ -216,8 +174,7 @@ class ScriptTranslation : public Translation {
   bool PrepareCandidate();
   template <class QueryResult>
   void EnrollEntries(map<int, DictEntryList>& entries_by_end_pos,
-                     const an<QueryResult>& query_result,
-                     size_t start_pos);
+                     const an<QueryResult>& query_result);
   WordGraph PrepareForMakingSentence(Dictionary* dict,
                                      UserDictionary* user_dict);
   an<Sentence> MakeSentence(Dictionary* dict, UserDictionary* user_dict);
@@ -300,14 +257,9 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
         canonicalizer_ = std::move(canonicalizer);
       }
     }
-    if (an<ConfigList> rules = get_auxiliary_algebra(config, name_space_)) {
-      the<Projection> auxiliary_algebra(new Projection());
-      if (auxiliary_algebra->Load(rules)) {
-        auxiliary_algebra_ = std::move(auxiliary_algebra);
-      }
-    }
     auxiliary_mode_ = true;
     config->GetBool(name_space_ + "/auxiliary_mode", &auxiliary_mode_);
+    config->GetString(name_space_ + "/aux", &auxiliary_type_);
     config->GetString(name_space_ + "/auxiliary_option", &auxiliary_option_);
     config->GetString(name_space_ + "/aux_suffix", &auxiliary_suffix_trigger_);
   }
@@ -332,16 +284,18 @@ an<Translation> ScriptTranslator::Query(const string& input,
 
   FinishSession();
 
-  if (!auxiliary_matcher_ && dict_->prism()->SupportsAuxiliaryCharacters()) {
-    if (auto component =
-            ReverseLookupDictionary::Require("reverse_lookup_dictionary")) {
-      Ticket ticket(engine_, name_space_);
-      auxiliary_reverse_.reset(component->Create(ticket));
-      if (auxiliary_reverse_ && !auxiliary_reverse_->Load())
-        auxiliary_reverse_.reset();
-    }
-    auxiliary_matcher_ = std::make_shared<AuxiliaryMatcher>(
-        dict_.get(), auxiliary_reverse_.get());
+  if (!auxiliary_db_ && !auxiliary_type_.empty()) {
+    const ResourceType resource_type = {"auxiliary_db", "", ".aux.bin"};
+    the<ResourceResolver> resolver(
+        Service::instance().CreateDeployedResourceResolver(resource_type));
+    auxiliary_db_ = the<AuxiliaryDb>(
+        new AuxiliaryDb(resolver->ResolvePath(auxiliary_type_)));
+    if (!auxiliary_db_->Load())
+      auxiliary_db_.reset();
+  }
+  if (!auxiliary_matcher_ && auxiliary_db_) {
+    auxiliary_matcher_ =
+        std::make_shared<AuxiliaryMatcher>(dict_.get(), auxiliary_db_.get());
   }
 
   string auxiliary_suffix;
@@ -352,8 +306,6 @@ an<Translation> ScriptTranslator::Query(const string& input,
                          auxiliary_suffix_trigger_) == 0) {
     auxiliary_suffix =
         full_input.substr(segment.end + auxiliary_suffix_trigger_.size());
-    if (auxiliary_algebra_)
-      auxiliary_algebra_->Apply(&auxiliary_suffix);
   }
 
   bool user_dict_available =
@@ -404,7 +356,6 @@ bool ScriptTranslator::SelectPrism() {
     if (user_dict_)
       user_dict_->Attach(dict_->primary_table(), dict_->prism());
     auxiliary_matcher_.reset();
-    auxiliary_reverse_.reset();
   }
   if (!dict_->loaded() && !dict_->Load())
     return false;
@@ -647,28 +598,6 @@ static bool has_exact_match_phrase(Ptr ptr, Iter iter, size_t consumed) {
   return entry && entry->IsExactMatch();
 }
 
-// 同音截断前先应用 AUX 过滤。
-template <class Collector>
-static void FilterAuxiliaryEntries(const an<Collector>& collector,
-                                   const SyllableGraph& graph,
-                                   size_t start) {
-  if (!collector)
-    return;
-  for (auto it = collector->begin(); it != collector->end();) {
-    const size_t end = it->first;
-    it->second.AddFilter([&graph, start, end](an<DictEntry> entry) {
-      bool keep =
-          entry && SyllableGraphMatches(graph, entry->code, entry->text, start,
-                                        end, entry->matching_code_size);
-      return keep;
-    });
-    if (it->second.exhausted()) {
-      it = collector->erase(it);
-    } else
-      ++it;
-  }
-}
-
 template <class Collector>
 static void FilterAuxiliarySuffixEntries(
     const an<Collector>& collector,
@@ -716,10 +645,6 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
     user_phrase_ =
         user_dict->Lookup(syllable_graph, 0, kUnlimitedDepth,
                           predict_word ? kNumSyllablesToPredictWord : 0);
-  }
-  if (syllabifier_->auxiliary_active()) {
-    FilterAuxiliaryEntries(phrase_, syllable_graph, 0);
-    FilterAuxiliaryEntries(user_phrase_, syllable_graph, 0);
   }
   if (!auxiliary_suffix_.empty()) {
     FilterAuxiliarySuffixEntries(phrase_, translator_->auxiliary_matcher(),
@@ -987,13 +912,8 @@ bool ScriptTranslation::CheckEmpty() {
 template <class QueryResult>
 void ScriptTranslation::EnrollEntries(
     map<int, DictEntryList>& entries_by_end_pos,
-    const an<QueryResult>& query_result,
-    size_t start_pos) {
+    const an<QueryResult>& query_result) {
   if (query_result) {
-    if (syllabifier_->auxiliary_active()) {
-      FilterAuxiliaryEntries(query_result, syllabifier_->syllable_graph(),
-                             start_pos);
-    }
     for (auto& y : *query_result) {
       DictEntryList& homophones = entries_by_end_pos[y.first];
       while (homophones.size() < translator_->max_homophones() &&
@@ -1020,11 +940,6 @@ WordGraph ScriptTranslation::PrepareForMakingSentence(
                             : nullptr;
     auto system_results =
         dict->Lookup(syllable_graph, x.first, &translator_->blacklist());
-    // AUX 可能删除候选节点，必须先过滤再遍历。
-    if (syllabifier_->auxiliary_active()) {
-      FilterAuxiliaryEntries(user_results, syllable_graph, x.first);
-      FilterAuxiliaryEntries(system_results, syllable_graph, x.first);
-    }
     if (user_results) {
       for (auto& y : *user_results) {
         DictEntryIterator* sys = nullptr;
@@ -1037,8 +952,8 @@ WordGraph ScriptTranslation::PrepareForMakingSentence(
         user_rank::Apply(sys, &y.second, true);
       }
     }
-    EnrollEntries(same_start_pos, user_results, x.first);
-    EnrollEntries(same_start_pos, system_results, x.first);
+    EnrollEntries(same_start_pos, user_results);
+    EnrollEntries(same_start_pos, system_results);
   }
   return graph;
 }

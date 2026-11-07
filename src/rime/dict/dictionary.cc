@@ -14,6 +14,7 @@
 #include <rime/ticket.h>
 #include <utf8.h>
 #include <utility>
+#include <tuple>
 
 namespace rime {
 
@@ -30,6 +31,7 @@ struct Chunk {
   double credibility = 0.0;
   double quality_len = 0.0;
   bool abbreviated_auxiliary = false;
+  std::shared_ptr<const AuxiliaryPath> auxiliary_path;
 
   Chunk() = default;
   Chunk(Table* t,
@@ -64,7 +66,16 @@ struct Chunk {
         matching_code_size(a.index_code().size()),
         credibility(cr),
         quality_len(q),
-        abbreviated_auxiliary(a.abbreviated_auxiliary()) {}
+        abbreviated_auxiliary(a.abbreviated_auxiliary()),
+        auxiliary_path(a.auxiliary_path()) {}
+
+  void SkipNonMatchingAuxiliary() {
+    if (!auxiliary_path)
+      return;
+    while (cursor < size &&
+           !auxiliary_path->Matches(table->GetEntryText(entries[cursor])))
+      ++cursor;
+  }
 
   bool is_exact_match() const { return matching_code_size == code.size(); }
 
@@ -127,35 +138,54 @@ CodeMatch match_extra_code(const table::Code* extra_code,
   return best_match;
 }
 
-// In an AUX graph, keep all viable tail positions. The ordinary path can
-// still use the original best-match fast path.
-void collect_extra_code_matches(const table::Code* extra_code,
-                                size_t depth,
-                                const SyllableGraph& graph,
-                                size_t pos,
-                                bool predict_word,
-                                std::set<std::pair<size_t, size_t>>* matches,
-                                std::set<std::pair<size_t, size_t>>* seen) {
-  if (!seen->insert({depth, pos}).second)
+struct AuxiliaryCodeMatch {
+  size_t depth;
+  size_t end_pos;
+  double credibility;
+  bool abbreviated;
+};
+
+// Tail indices store four-syllable and longer entries outside the table trie.
+// Match each tail against its own text, preserving the chosen AUX path's score.
+void collect_extra_code_matches(
+    const table::Code* extra_code,
+    size_t depth,
+    const SyllableGraph& graph,
+    size_t pos,
+    bool predict_word,
+    const vector<string>& characters,
+    size_t prefix_depth,
+    double credibility,
+    bool abbreviated,
+    map<std::tuple<size_t, size_t, bool>, AuxiliaryCodeMatch>* matches,
+    map<std::tuple<size_t, size_t, bool>, double>* seen) {
+  auto state = std::make_tuple(depth, pos, abbreviated);
+  auto best = seen->find(state);
+  if (best != seen->end() && best->second >= credibility)
     return;
-  if (depth >= extra_code->size) {
-    matches->insert({depth, pos});
+  (*seen)[state] = credibility;
+  if (depth >= extra_code->size ||
+      (predict_word && pos >= graph.interpreted_length)) {
+    (*matches)[state] = {depth, pos, credibility, abbreviated};
     return;
   }
-  if (pos >= graph.interpreted_length) {
-    if (predict_word)
-      matches->insert({depth, graph.interpreted_length});
+  auto index = graph.indices.find(pos);
+  if (index == graph.indices.end())
     return;
+  auto found = index->second.find(extra_code->at[depth]);
+  if (found == index->second.end())
+    return;
+  for (const auto* props : found->second) {
+    if (props->auxiliary_chars &&
+        (prefix_depth + depth >= characters.size() ||
+         !props->auxiliary_chars->count(characters[prefix_depth + depth])))
+      continue;
+    collect_extra_code_matches(
+        extra_code, depth + 1, graph, props->end_pos, predict_word, characters,
+        prefix_depth, credibility + props->credibility,
+        abbreviated || (props->auxiliary_chars && props->type == kAbbreviation),
+        matches, seen);
   }
-  auto it = graph.indices.find(pos);
-  if (it == graph.indices.end())
-    return;
-  auto found = it->second.find(extra_code->at[depth]);
-  if (found == it->second.end())
-    return;
-  for (const auto* edge : found->second)
-    collect_extra_code_matches(extra_code, depth + 1, graph, edge->end_pos,
-                               predict_word, matches, seen);
 }
 
 }  // namespace dictionary
@@ -164,13 +194,16 @@ DictEntryIterator::DictEntryIterator()
     : query_result_(New<dictionary::QueryResult>()) {}
 
 void DictEntryIterator::AddChunk(dictionary::Chunk&& chunk) {
+  chunk.SkipNonMatchingAuxiliary();
+  if (chunk.cursor >= chunk.size)
+    return;
   has_abbreviated_auxiliary_ |= chunk.abbreviated_auxiliary;
   query_result_->chunks.push_back(std::move(chunk));
   entry_count_ += chunk.size;
 }
 
 void DictEntryIterator::Sort() {
-  if (ordered_mode_)
+  if (ordered_mode_ || exhausted())
     return;
   auto& chunks = query_result_->chunks;
   // partial-sort remaining chunks, move best match to chunk_index_
@@ -349,7 +382,9 @@ bool DictEntryIterator::FindNextEntry() {
     return false;
   }
   auto& chunk = query_result_->chunks[chunk_index_];
-  if (++chunk.cursor >= chunk.size) {
+  ++chunk.cursor;
+  chunk.SkipNonMatchingAuxiliary();
+  if (chunk.cursor >= chunk.size) {
     ++chunk_index_;
   }
   if (exhausted()) {
@@ -460,20 +495,30 @@ static void lookup_table(Table* table,
                                                   a.abbreviated_auxiliary()});
             continue;
           }
-          std::set<std::pair<size_t, size_t>> matches, seen;
-          dictionary::collect_extra_code_matches(a.extra_code(), 0,
-                                                 syllable_graph, end_pos,
-                                                 predict_word, &matches, &seen);
           const Code code = a.code();
           const string text = table->GetEntryText(*a.entry());
-          for (const auto& match : matches) {
-            size_t matching = a.index_code().size() + match.first;
-            if (!SyllableGraphMatches(syllable_graph, code, text, start_pos,
-                                      match.second, matching))
-              continue;
-            (*collector)[match.second].AddChunk({table, code, a.entry(),
-                                                 matching, cr, q,
-                                                 a.abbreviated_auxiliary()});
+          if (a.auxiliary_path() && !a.auxiliary_path()->Matches(text))
+            continue;
+          vector<string> characters;
+          auto p = text.begin();
+          while (p != text.end()) {
+            auto begin = p;
+            utf8::next(p, text.end());
+            characters.emplace_back(begin, p);
+          }
+          map<std::tuple<size_t, size_t, bool>, dictionary::AuxiliaryCodeMatch>
+              matches;
+          map<std::tuple<size_t, size_t, bool>, double> seen;
+          dictionary::collect_extra_code_matches(
+              a.extra_code(), 0, syllable_graph, end_pos, predict_word,
+              characters, a.index_code().size(), cr, a.abbreviated_auxiliary(),
+              &matches, &seen);
+          for (const auto& item : matches) {
+            const auto& match = item.second;
+            const size_t matching = a.index_code().size() + match.depth;
+            (*collector)[match.end_pos].AddChunk({table, code, a.entry(),
+                                                  matching, match.credibility,
+                                                  0.0, match.abbreviated});
           }
         } while (a.Next());
       } else {

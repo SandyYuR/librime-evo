@@ -15,6 +15,7 @@
 #include <utf8.h>
 #include <rime/algo/algebra.h>
 #include <rime/algo/utilities.h>
+#include <rime/dict/auxiliary_db.h>
 #include <rime/dict/corrector.h>
 #include <rime/dict/dict_compiler.h>
 #include <rime/dict/dict_settings.h>
@@ -31,11 +32,12 @@ namespace rime {
 
 static bool IsAsciiPrismKey(const string& key);
 static ReverseLookupTable ReadAuxiliarySources(const vector<path>& files);
-static ReverseLookupTable BuildAuxiliaryReverseLookup(
-    const path& schema_file,
-    const vector<path>& files,
-    const string& translator_namespace,
-    const string& auxiliary_type);
+static bool BuildAuxiliaryDatabase(const path& schema_file,
+                                   const vector<path>& files,
+                                   const string& translator_namespace,
+                                   const string& auxiliary_type,
+                                   const path& target,
+                                   uint32_t checksum);
 
 static bool get_speller_algebra(Config& config,
                                 const string& path,
@@ -184,20 +186,29 @@ bool DictCompiler::Compile(const path& schema_file) {
     return false;
   }
   const bool aux_active = !auxiliary_files.empty();
-  ReverseLookupTable auxiliary_reverse;
-  if (aux_active) {
-    auxiliary_reverse = BuildAuxiliaryReverseLookup(
-        schema_file, auxiliary_files, translator_namespace_, auxiliary_type_);
-  }
   uint32_t schema_file_checksum =
       schema_file.empty() ? 0 : Checksum(schema_file);
   uint32_t dict_file_checksum =
       compute_dict_file_checksum(0, dict_files, settings);
   if (aux_active) {
-    ChecksumComputer aux_checksum(dict_file_checksum);
+    ChecksumComputer aux_checksum(schema_file_checksum);
     for (const auto& file : auxiliary_files)
       aux_checksum.ProcessFile(file);
-    dict_file_checksum = aux_checksum.Checksum();
+    const uint32_t auxiliary_checksum = aux_checksum.Checksum();
+    const path auxiliary_path =
+        target_resolver_->ResolvePath(auxiliary_type_ + ".aux.bin");
+    AuxiliaryDb auxiliary_db(auxiliary_path);
+    bool rebuild_auxiliary = true;
+    if (auxiliary_db.Exists() && auxiliary_db.Load()) {
+      rebuild_auxiliary = auxiliary_db.checksum() != auxiliary_checksum;
+      auxiliary_db.Close();
+    }
+    if (rebuild_auxiliary &&
+        !BuildAuxiliaryDatabase(schema_file, auxiliary_files,
+                                translator_namespace_, auxiliary_type_,
+                                auxiliary_path, auxiliary_checksum)) {
+      return false;
+    }
   }
   bool rebuild_table = false;
   bool rebuild_prism = false;
@@ -220,20 +231,10 @@ bool DictCompiler::Compile(const path& schema_file) {
   if (prism_->Exists() && prism_->Load()) {
     rebuild_prism = prism_->dict_file_checksum() != dict_file_checksum ||
                     prism_->schema_file_checksum() != schema_file_checksum;
-    // A Prism from an older AUX format cannot describe the current metadata.
-    if (build_table_from_source && aux_active &&
-        !prism_->SupportsAuxiliaryCharacters()) {
-      rebuild_prism = true;
-    }
     prism_->Close();
   } else {
     rebuild_prism = true;
-    // No compatible Prism means the companion AUX descriptors must be rebuilt.
   }
-  // The AUX reverse projection is stored in the reverse database, so rebuild
-  // the primary table along with the Prism when its schema changes.
-  if (build_table_from_source && aux_active && rebuild_prism)
-    rebuild_table = true;
   LOG(INFO) << dict_file << "[" << dict_files.size() << " file(s)]"
             << " (" << dict_file_checksum << ")";
   LOG(INFO) << schema_file << " (" << schema_file_checksum << ")";
@@ -256,8 +257,7 @@ bool DictCompiler::Compile(const path& schema_file) {
   Syllabary syllabary;
   if (rebuild_table) {
     EntryCollector collector;
-    if (!BuildTable(0, collector, &settings, dict_files, dict_file_checksum,
-                    &auxiliary_reverse)) {
+    if (!BuildTable(0, collector, &settings, dict_files, dict_file_checksum)) {
       return false;
     }
     syllabary = std::move(collector.syllabary);
@@ -268,9 +268,7 @@ bool DictCompiler::Compile(const path& schema_file) {
       LOG(WARNING) << "couldn't load syllabary from '" << schema_file << "'";
   }
   if (rebuild_prism &&
-      !BuildPrism(schema_file, dict_file_checksum, schema_file_checksum,
-                  aux_active ? &dict_files : nullptr,
-                  aux_active ? &auxiliary_files : nullptr)) {
+      !BuildPrism(schema_file, dict_file_checksum, schema_file_checksum)) {
     return false;
   }
   for (int table_index = 1; table_index < tables_.size(); ++table_index) {
@@ -331,8 +329,7 @@ bool DictCompiler::BuildTable(int table_index,
                               EntryCollector& collector,
                               DictSettings* settings,
                               const vector<path>& dict_files,
-                              uint32_t dict_file_checksum,
-                              const ReverseLookupTable* auxiliary_reverse) {
+                              uint32_t dict_file_checksum) {
   auto& table = tables_[table_index];
   auto target_path =
       relocate_target(table->file_path(), target_resolver_.get());
@@ -386,8 +383,7 @@ bool DictCompiler::BuildTable(int table_index,
   }
   // build reverse db for the primary table
   if (table_index == 0 &&
-      !BuildReverseDb(settings, collector, vocabulary, dict_file_checksum,
-                      auxiliary_reverse)) {
+      !BuildReverseDb(settings, collector, vocabulary, dict_file_checksum)) {
     return false;
   }
   return true;
@@ -396,14 +392,12 @@ bool DictCompiler::BuildTable(int table_index,
 bool DictCompiler::BuildReverseDb(DictSettings* settings,
                                   const EntryCollector& collector,
                                   const Vocabulary& vocabulary,
-                                  uint32_t dict_file_checksum,
-                                  const ReverseLookupTable* auxiliary_reverse) {
+                                  uint32_t dict_file_checksum) {
   // build .reverse.bin
   auto target_path = target_resolver_->ResolvePath(dict_name_ + ".reverse.bin");
   ReverseDb reverse_db(target_path);
   if (!reverse_db.Build(settings, collector.syllabary, vocabulary,
-                        collector.stems, dict_file_checksum,
-                        auxiliary_reverse) ||
+                        collector.stems, dict_file_checksum) ||
       !reverse_db.Save()) {
     LOG(ERROR) << "error building reversedb.";
     return false;
@@ -418,42 +412,6 @@ static bool IsAsciiPrismKey(const string& key) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '/';
   });
-}
-
-// Read the pure single-character pronunciations from the main dictionary.
-// AUX is a separate imported table, so the main source must not carry a
-// separator or any AUX suffix.
-static ReverseLookupTable ReadPureCharacterSources(const vector<path>& files) {
-  ReverseLookupTable characters;
-  for (const auto& file : files) {
-    std::ifstream in(file.c_str());
-    DictSettings header;
-    if (!header.LoadDictHeader(in, true))
-      continue;
-    const int text_col = header.GetColumnIndex("text");
-    const int code_col = header.GetColumnIndex("code");
-    if (text_col < 0 || code_col < 0)
-      continue;
-    string line;
-    while (std::getline(in, line)) {
-      boost::algorithm::trim_right(line);
-      if (line.empty() || line[0] == '#')
-        continue;
-      auto row = strings::split(line, "\t");
-      if (static_cast<int>(row.size()) <= std::max(text_col, code_col))
-        continue;
-      const string& word = row[text_col];
-      const string& code = row[code_col];
-      if (word.empty() || code.empty() || code.find(';') != string::npos)
-        continue;
-      auto pos = word.begin();
-      utf8::next(pos, word.end());
-      if (pos == word.end()) {
-        characters[word].insert(code);
-      }
-    }
-  }
-  return characters;
 }
 
 // Read the independent AUX dictionary. Each row is simply character<TAB>code;
@@ -491,28 +449,29 @@ static ReverseLookupTable ReadAuxiliarySources(const vector<path>& files) {
   return auxiliary;
 }
 
-static ReverseLookupTable BuildAuxiliaryReverseLookup(
-    const path& schema_file,
-    const vector<path>& files,
-    const string& translator_namespace,
-    const string& auxiliary_type) {
-  ReverseLookupTable result;
+static bool BuildAuxiliaryDatabase(const path& schema_file,
+                                   const vector<path>& files,
+                                   const string& translator_namespace,
+                                   const string& auxiliary_type,
+                                   const path& target,
+                                   uint32_t checksum) {
   if (schema_file.empty() || files.empty())
-    return result;
+    return true;
 
   Config schema;
   if (!schema.LoadFromFile(schema_file))
-    return result;
+    return false;
   string aux_path = translator_namespace + "/aux_algebra";
   if (schema.IsNull(aux_path))
     aux_path = "speller/aux_algebra";
   an<ConfigList> aux_algebra;
   if (!get_speller_algebra(schema, aux_path, &aux_algebra, auxiliary_type) ||
       !aux_algebra)
-    return result;
+    return false;
   Projection projection;
   if (!projection.Load(aux_algebra))
-    return result;
+    return false;
+  map<pair<string, string>, SpellingProperties> entries;
   const auto sources = ReadAuxiliarySources(files);
   for (const auto& item : sources) {
     for (const auto& raw_code : item.second) {
@@ -523,20 +482,37 @@ static ReverseLookupTable BuildAuxiliaryReverseLookup(
         if (!IsAsciiPrismKey(spelling.first))
           continue;
         for (const auto& variant : spelling.second) {
-          if (variant.properties.auxiliary)
-            result[item.first].insert(spelling.first);
+          if (variant.properties.auxiliary) {
+            auto key = std::make_pair(item.first, spelling.first);
+            auto it = entries.find(key);
+            if (it == entries.end() ||
+                variant.properties.type < it->second.type ||
+                (variant.properties.type == it->second.type &&
+                 variant.properties.credibility > it->second.credibility)) {
+              entries[key] = variant.properties;
+            }
+          }
         }
       }
     }
   }
-  return result;
+  map<string, vector<AuxiliaryCode>> by_character;
+  map<string, vector<AuxiliaryCharacter>> by_code;
+  for (const auto& item : entries) {
+    const auto& props = item.second;
+    by_character[item.first.first].push_back(
+        {item.first.second, props.type, props.credibility});
+    by_code[item.first.second].push_back(
+        {item.first.first, props.type, props.credibility});
+  }
+  AuxiliaryDb database(target);
+  database.Remove();
+  return database.Build(by_character, by_code, checksum) && database.Save();
 }
 
 bool DictCompiler::BuildPrism(const path& schema_file,
                               uint32_t dict_file_checksum,
-                              uint32_t schema_file_checksum,
-                              const vector<path>* source_files,
-                              const vector<path>* auxiliary_files) {
+                              uint32_t schema_file_checksum) {
   LOG(INFO) << "building prism...";
   auto target_path =
       relocate_target(prism_->file_path(), target_resolver_.get());
@@ -550,9 +526,6 @@ bool DictCompiler::BuildPrism(const path& schema_file,
     return false;
   // apply spelling algebra and prepare corrections (if enabled)
   Script script;
-  AuxiliaryCharacterMap auxiliary_characters;
-  size_t imported_aux_entries = 0;
-  bool aux_enabled = false;
   if (!schema_file.empty()) {
     Config config;
     if (!config.LoadFromFile(schema_file)) {
@@ -560,22 +533,12 @@ bool DictCompiler::BuildPrism(const path& schema_file,
       return false;
     }
     Projection p;
-    Projection aux_projection;
     an<ConfigList> algebra;
     string algebra_path = translator_namespace_ + "/algebra";
     if (config.IsNull(algebra_path))
       algebra_path = "speller/algebra";
     if (!get_speller_algebra(config, algebra_path, &algebra, input_type_))
       return false;
-    an<ConfigList> aux_algebra;
-    if (auxiliary_files) {
-      string aux_path = translator_namespace_ + "/aux_algebra";
-      if (config.IsNull(aux_path))
-        aux_path = "speller/aux_algebra";
-      if (!get_speller_algebra(config, aux_path, &aux_algebra, auxiliary_type_))
-        return false;
-      aux_enabled = static_cast<bool>(aux_algebra);
-    }
     if (algebra) {
       for (size_t i = 0; i < algebra->size(); ++i) {
         auto formula = algebra->GetValueAt(i);
@@ -591,8 +554,7 @@ bool DictCompiler::BuildPrism(const path& schema_file,
       }
     }
     const bool ordinary_loaded = !algebra || p.Load(algebra);
-    const bool aux_loaded = !aux_algebra || aux_projection.Load(aux_algebra);
-    if (!ordinary_loaded || !aux_loaded) {
+    if (!ordinary_loaded) {
       LOG(ERROR) << "failed to load spelling algebra";
       return false;
     }
@@ -601,74 +563,6 @@ bool DictCompiler::BuildPrism(const path& schema_file,
     }
     if (ordinary_loaded)
       p.Apply(&script);
-    if (source_files && auxiliary_files && aux_algebra && ordinary_loaded) {
-      const auto source_characters = ReadPureCharacterSources(*source_files);
-      const auto auxiliary_characters_by_text =
-          ReadAuxiliarySources(*auxiliary_files);
-      for (const auto& item : auxiliary_characters_by_text) {
-        set<string> projected_aux_codes;
-        map<string, SpellingProperties> projected_aux_properties;
-        for (const auto& raw_aux_code : item.second) {
-          Script projected_aux;
-          projected_aux.AddSyllable(raw_aux_code);
-          aux_projection.Apply(&projected_aux);
-          for (const auto& aux_item : projected_aux) {
-            for (const auto& spelling : aux_item.second) {
-              if (spelling.properties.auxiliary &&
-                  IsAsciiPrismKey(aux_item.first)) {
-                projected_aux_codes.insert(aux_item.first);
-                auto it = projected_aux_properties.find(aux_item.first);
-                if (it == projected_aux_properties.end() ||
-                    spelling.properties.type < it->second.type ||
-                    (spelling.properties.type == it->second.type &&
-                     spelling.properties.credibility >
-                         it->second.credibility)) {
-                  projected_aux_properties[aux_item.first] =
-                      spelling.properties;
-                }
-              }
-            }
-          }
-        }
-        if (projected_aux_codes.empty())
-          continue;
-        const auto source_it = source_characters.find(item.first);
-        if (source_it == source_characters.end())
-          continue;
-        for (const auto& base : source_it->second) {
-          if (syllabary.find(base) == syllabary.end())
-            continue;
-          Script projected_base;
-          projected_base.AddSyllable(base);
-          p.Apply(&projected_base);
-          for (const auto& base_item : projected_base) {
-            bool normal_projection = false;
-            for (const auto& normal : base_item.second) {
-              if (!normal.properties.auxiliary &&
-                  normal.properties.type == kNormalSpelling) {
-                normal_projection = true;
-                break;
-              }
-            }
-            if (!normal_projection || !IsAsciiPrismKey(base_item.first))
-              continue;
-            for (const auto& aux_code : projected_aux_codes) {
-              const string aux_key = base_item.first + aux_code;
-              Spelling remapped(base);
-              const auto aux_properties =
-                  projected_aux_properties.find(aux_code);
-              if (aux_properties != projected_aux_properties.end())
-                remapped.properties = aux_properties->second;
-              remapped.properties.auxiliary = true;
-              script.Merge(aux_key, SpellingProperties(), {remapped});
-              ++imported_aux_entries;
-              auto& allowed = auxiliary_characters[{aux_key, base}];
-              allowed.insert(item.first);
-            }
-          }
-        }
-      }
-    }
 
 #if 0
     // build corrector
@@ -692,13 +586,6 @@ bool DictCompiler::BuildPrism(const path& schema_file,
     }
 #endif
   }
-  if (auxiliary_files && aux_enabled) {
-    size_t accepted = 0;
-    for (const auto& item : auxiliary_characters)
-      accepted += item.second.size();
-    if (imported_aux_entries && !accepted)
-      LOG(ERROR) << "no AUX matches mapped to the phonetic syllabary";
-  }
   if ((options_ & kDump) && !script.empty()) {
     path dump_path(prism_->file_path());
     dump_path.replace_extension(".txt");
@@ -708,8 +595,7 @@ bool DictCompiler::BuildPrism(const path& schema_file,
   {
     prism_->Remove();
     if (!prism_->Build(syllabary, script.empty() ? nullptr : &script,
-                       dict_file_checksum, schema_file_checksum,
-                       aux_enabled ? &auxiliary_characters : nullptr) ||
+                       dict_file_checksum, schema_file_checksum) ||
         !prism_->Save()) {
       return false;
     }

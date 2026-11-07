@@ -35,6 +35,8 @@ struct DfsState {
   Code code;
   vector<double> credibility;
   vector<double> quality_len;
+  std::shared_ptr<const AuxiliaryPath> auxiliary_path;
+  bool abbreviated_auxiliary = false;
   hash_map<int, DictEntryList> query_result;
   an<DbAccessor> accessor;
   string key;
@@ -81,6 +83,9 @@ void DfsState::RecruitEntry(size_t pos,
       key, value, present_tick, credibility.back(), quality_len.back(),
       syllabary ? &full_code : nullptr, use_automatic);
   if (e) {
+    if (auxiliary_path && !auxiliary_path->Matches(e->text))
+      return;
+    e->abbreviated_auxiliary = abbreviated_auxiliary;
     if (syllabary) {
       vector<string> syllables =
           strings::split(full_code, " ", strings::SplitBehavior::SkipToken);
@@ -297,8 +302,15 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
       continue;
     for (size_t i = 0; i < spelling.second.size(); ++i) {
       auto props = spelling.second[i];
-      if (i > 0 && props->type >= kAbbreviation)
+      if (i > 0 && props->type >= kAbbreviation && !props->auxiliary_chars)
         continue;
+      auto previous_path = state->auxiliary_path;
+      const bool previous_abbreviated = state->abbreviated_auxiliary;
+      if (props->auxiliary_chars) {
+        state->auxiliary_path = std::make_shared<AuxiliaryPath>(AuxiliaryPath{
+            previous_path, state->depth() - 1, props->auxiliary_chars});
+        state->abbreviated_auxiliary |= props->type == kAbbreviation;
+      }
       state->credibility.push_back(state->credibility.back() +
                                    props->credibility);
       size_t end_pos = props->end_pos;
@@ -311,6 +323,11 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
       BOOST_SCOPE_EXIT((&state)) {
         state->credibility.pop_back();
         state->quality_len.pop_back();
+      }
+      BOOST_SCOPE_EXIT_END
+      BOOST_SCOPE_EXIT((&state)(&previous_path)(previous_abbreviated)) {
+        state->auxiliary_path = std::move(previous_path);
+        state->abbreviated_auxiliary = previous_abbreviated;
       }
       BOOST_SCOPE_EXIT_END
       DLOG(INFO) << "edge: [" << current_pos << ", " << end_pos << ")";
