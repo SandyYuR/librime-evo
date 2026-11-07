@@ -45,6 +45,8 @@ struct AuxGraphMatch {
   size_t length = 0;
   SyllableId syllable_id = -1;
   std::shared_ptr<const std::set<string>> allowed_chars;
+  SpellingType type = kNormalSpelling;
+  double credibility = 0.0;
 };
 
 struct AuxiliaryConstraint {

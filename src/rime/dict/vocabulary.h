@@ -61,6 +61,7 @@ struct DictEntry {
   uint64_t manual_version = 0;  // v, for deterministic equal-slot tie
   int remaining_code_length = 0;
   int matching_code_size = 0;
+  bool abbreviated_auxiliary = false;
 
   DictEntry() = default;
   ShortDictEntry ToShort() const { return {text, code, weight}; }

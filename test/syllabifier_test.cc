@@ -370,7 +370,8 @@ TEST(RimeSyllabifierAuxiliaryTest, KeepsBothOrdinaryAndAuxiliaryPaths) {
         if (input.compare(0, 3, "abc") == 0) {
           out->push_back({3, 0,
                           std::make_shared<const std::set<rime::string>>(
-                              std::set<rime::string>{"甲"})});
+                              std::set<rime::string>{"甲"}),
+                          rime::kAbbreviation, -0.6931471805599453});
         }
       });
   rime::SyllableGraph graph;
@@ -379,6 +380,8 @@ TEST(RimeSyllabifierAuxiliaryTest, KeepsBothOrdinaryAndAuxiliaryPaths) {
   ASSERT_TRUE(graph.edges[0].count(3));
   ASSERT_TRUE(graph.edges[2].count(5));
   ASSERT_TRUE(graph.edges[3].count(5));
+  EXPECT_EQ(rime::kAbbreviation, graph.edges[0][3][0].type);
+  EXPECT_DOUBLE_EQ(-0.6931471805599453, graph.edges[0][3][0].credibility);
   rime::Code aux;
   aux.push_back(0);
   aux.push_back(2);
@@ -388,6 +391,88 @@ TEST(RimeSyllabifierAuxiliaryTest, KeepsBothOrdinaryAndAuxiliaryPaths) {
   EXPECT_TRUE(rime::SyllableGraphMatches(graph, aux, "甲乙", 0, 5));
   EXPECT_FALSE(rime::SyllableGraphMatches(graph, aux, "家乙", 0, 5));
   EXPECT_TRUE(rime::SyllableGraphMatches(graph, plain, "家丙", 0, 5));
+}
+
+TEST(RimeSyllabifierAuxiliaryTest, PrefersTheLongestAuxiliaryPrefix) {
+  rime::Syllabary syllables = {"ab", "abcd"};
+  rime::Prism prism(rime::path{"syllabifier_auxiliary_longest.bin"});
+  ASSERT_TRUE(prism.Build(syllables));
+  rime::Syllabifier syllabifier;
+  syllabifier.SetAuxiliaryLookup(
+      [](const rime::string& input, rime::vector<rime::AuxGraphMatch>* out) {
+        if (input.compare(0, 4, "abcd") == 0) {
+          auto allowed = std::make_shared<const std::set<rime::string>>(
+              std::set<rime::string>{"甲"});
+          out->push_back({3, 0, allowed});
+          out->push_back({4, 1, allowed});
+        }
+      });
+  rime::SyllableGraph graph;
+  ASSERT_EQ(4, syllabifier.BuildSyllableGraph("abcd", prism, &graph));
+  EXPECT_FALSE(graph.edges[0].count(3));
+  ASSERT_TRUE(graph.edges[0].count(4));
+  rime::Code code;
+  code.push_back(1);
+  EXPECT_TRUE(rime::SyllableGraphMatches(graph, code, "甲", 0, 4));
+}
+
+TEST(RimeSyllabifierAuxiliaryTest, CompleteAuxiliaryKeyBeatsAbbreviatedTail) {
+  rime::Syllabary syllables = {"ai", "y"};
+  rime::Script script;
+  script["ai"].push_back(rime::Spelling("ai"));
+  script["y"].push_back(rime::Spelling("y"));
+  rime::Spelling auxiliary("ai");
+  auxiliary.properties.auxiliary = true;
+  script["aiwy"].push_back(auxiliary);
+
+  rime::Prism prism(rime::path{"syllabifier_auxiliary_full_key.bin"});
+  ASSERT_TRUE(prism.Build(syllables, &script));
+  rime::Syllabifier syllabifier;
+  syllabifier.SetAuxiliaryLookup(
+      [](const rime::string& input, rime::vector<rime::AuxGraphMatch>* out) {
+        if (input.compare(0, 4, "aiwy") == 0) {
+          auto allowed = std::make_shared<const std::set<rime::string>>(
+              std::set<rime::string>{"哀"});
+          out->push_back({3, 0, allowed});
+          out->push_back({4, 0, allowed});
+        }
+      });
+
+  rime::SyllableGraph graph;
+  ASSERT_EQ(4, syllabifier.BuildSyllableGraph("aiwy", prism, &graph));
+  EXPECT_FALSE(graph.edges[0].count(3));
+  ASSERT_TRUE(graph.edges[0].count(4));
+  rime::Code code;
+  code.push_back(0);
+  EXPECT_TRUE(rime::SyllableGraphMatches(graph, code, "哀", 0, 4));
+}
+
+TEST(RimeSyllabifierAuxiliaryTest,
+     AbbreviatedAuxiliaryDoesNotSuppressOrdinaryPhrase) {
+  rime::Syllabary syllables = {"j", "z"};
+  rime::Prism prism(rime::path{"syllabifier_auxiliary_abbrev.bin"});
+  ASSERT_TRUE(prism.Build(syllables));
+  rime::Syllabifier syllabifier;
+  syllabifier.SetAuxiliaryLookup(
+      [](const rime::string& input, rime::vector<rime::AuxGraphMatch>* out) {
+        if (input.compare(0, 2, "zj") == 0) {
+          out->push_back({2, 1,
+                          std::make_shared<const std::set<rime::string>>(
+                              std::set<rime::string>{"锃"}),
+                          rime::kAbbreviation, -0.6931471805599453});
+        }
+      });
+
+  rime::SyllableGraph graph;
+  ASSERT_EQ(2, syllabifier.BuildSyllableGraph("zj", prism, &graph));
+  EXPECT_TRUE(graph.auxiliary_constraints.empty());
+  rime::Code ordinary;
+  ordinary.push_back(1);
+  ordinary.push_back(0);
+  EXPECT_TRUE(rime::SyllableGraphMatches(graph, ordinary, "增加", 0, 2));
+  rime::Code auxiliary;
+  auxiliary.push_back(1);
+  EXPECT_TRUE(rime::SyllableGraphMatches(graph, auxiliary, "锃", 0, 2));
 }
 
 TEST(RimeSyllabifierAuxiliaryTest, RemovesOrdinaryTailAtExactAuxSpan) {

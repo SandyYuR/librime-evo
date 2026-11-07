@@ -34,6 +34,9 @@ class RIME_DLL DictEntryIterator : public DictEntryFilterBinder {
 
   void AddChunk(dictionary::Chunk&& chunk);
   void Sort();
+  // Keep ordinary candidate order while placing abbreviated AUX entries
+  // before ordinary entries of the same text length.
+  void ApplyAuxiliaryOrdering();
   // A cursor-independent snapshot for rank anchoring; does not advance the live
   // translation.
   DictEntryIterator Fork() const;
@@ -55,6 +58,10 @@ class RIME_DLL DictEntryIterator : public DictEntryFilterBinder {
   size_t chunk_index_ = 0;
   an<DictEntry> entry_ = nullptr;
   size_t entry_count_ = 0;
+  vector<an<DictEntry>> ordered_entries_;
+  size_t ordered_index_ = 0;
+  bool ordered_mode_ = false;
+  bool has_abbreviated_auxiliary_ = false;
 };
 
 using DictEntryCollector = map<size_t, DictEntryIterator>;

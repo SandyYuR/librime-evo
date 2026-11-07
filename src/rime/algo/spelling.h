@@ -27,7 +27,7 @@ struct SpellingProperties {
   double credibility = 0.0;
   string tips;
   bool is_correction = false;
-  bool auxiliary = false;       // AUX hit; not a ranking penalty
+  bool auxiliary = false;       // AUX hit; may carry a rule-specific penalty
   string auxiliary_characters;  // compiled from the original single-character
                                 // source
 

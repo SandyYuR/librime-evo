@@ -70,6 +70,7 @@ void AuxiliaryMatcher::Lookup(const string& input,
       if (!accessor.properties().auxiliary)
         continue;
       auto id = accessor.syllable_id();
+      const auto properties = accessor.properties();
       const auto base_code = primary_->primary_table()->GetSyllableById(id);
       auto base = main_ids_.find(base_code);
       if (base == main_ids_.end())
@@ -95,7 +96,8 @@ void AuxiliaryMatcher::Lookup(const string& input,
                 .first;
       }
       if (!permitted->second->empty())
-        result->push_back({match.length, base->second, permitted->second});
+        result->push_back({match.length, base->second, permitted->second,
+                           properties.type, properties.credibility});
     }
   }
 }

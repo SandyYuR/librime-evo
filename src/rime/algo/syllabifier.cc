@@ -189,9 +189,19 @@ int Syllabifier::BuildSyllableGraph(const string& input,
           compact_aux_input.push_back(input[p]);
       }
       auxiliary_lookup_(compact_aux_input, &aux_matches);
+      // An unseparated input uses the longest complete AUX code at this
+      // position.  Shorter prefixes remain available only while no longer
+      // AUX code has matched, so `aiwy` cannot fall back to `aiw` + `y`.
+      size_t longest_aux_length = 0;
+      for (const auto& m : aux_matches) {
+        if (m.length > 0 && m.allowed_chars && !m.allowed_chars->empty() &&
+            m.syllable_id >= 0) {
+          longest_aux_length = (std::max)(longest_aux_length, m.length);
+        }
+      }
       for (const auto& m : aux_matches) {
         if (m.length == 0 || (!m.allowed_chars || m.allowed_chars->empty()) ||
-            m.syllable_id < 0)
+            m.syllable_id < 0 || m.length < longest_aux_length)
           continue;
         graph->has_auxiliary = true;
         // m.length is measured in the compact spelling.  Walk the original
@@ -210,17 +220,28 @@ int Syllabifier::BuildSyllableGraph(const string& input,
         while (end_pos < input.size() &&
                delimiters_.find(input[end_pos]) != string::npos)
           ++end_pos;
-        graph->auxiliary_constraints.push_back(
-            {current_pos, end_pos, m.syllable_id, m.allowed_chars});
+        // An abbreviated AUX hit supplies a low-quality candidate path.  It
+        // must not turn the whole span into a hard AUX filter, otherwise an
+        // ordinary phrase such as `zgjw` is discarded in favor of one
+        // character whose abbreviated AUX happens to be `jw`.
+        if (m.type < kAbbreviation) {
+          graph->auxiliary_constraints.push_back(
+              {current_pos, end_pos, m.syllable_id, m.allowed_chars});
+        }
         auto& spellings = graph->edges[current_pos][end_pos];
         auto it = spellings.find(m.syllable_id);
         if (it == spellings.end()) {
           EdgeProperties props;
           props.end_pos = end_pos;
+          props.type = m.type;
+          props.credibility = m.credibility;
           props.has_normal = false;
           props.auxiliary_chars = m.allowed_chars;
           spellings.emplace(m.syllable_id, std::move(props));
         } else {
+          it->second.type = (std::min)(it->second.type, m.type);
+          it->second.credibility =
+              (std::max)(it->second.credibility, m.credibility);
           auto merged = std::make_shared<std::set<string>>(
               it->second.auxiliary_chars ? *it->second.auxiliary_chars
                                          : std::set<string>{});
@@ -256,7 +277,10 @@ int Syllabifier::BuildSyllableGraph(const string& input,
           ++k;
           continue;  // Don't care correction edges
         }
-        if (k->second.type > last_type) {
+        // AUX edges remain valid even when their optional algebra metadata
+        // marks them as abbreviations.  Their type affects candidate quality,
+        // while auxiliary_chars keeps the path conditional on the AUX match.
+        if (k->second.type > last_type && !k->second.auxiliary_chars) {
           j->second.erase(k++);
         } else {
           if (k->second.type < edge_type)

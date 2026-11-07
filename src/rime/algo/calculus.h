@@ -107,11 +107,15 @@ class Reorder : public Calculation {
   bool dedup_;
 };
 
-// aux/pattern/replacement/: keep the original spelling, add an AUX hit.
+// aux/pattern/replacement/[abbrev]: keep the original spelling, add an AUX
+// hit, and optionally apply abbreviation ranking.
 class Auxiliary : public Derivation {
  public:
   static Factory Parse;
   bool Apply(Spelling* spelling);
+
+ private:
+  bool abbreviation_ = false;
 };
 
 }  // namespace rime

@@ -12,6 +12,7 @@
 #include <rime/schema.h>
 #include <rime/service.h>
 #include <rime/ticket.h>
+#include <utf8.h>
 #include <utility>
 
 namespace rime {
@@ -28,6 +29,7 @@ struct Chunk {
   size_t matching_code_size = 0;
   double credibility = 0.0;
   double quality_len = 0.0;
+  bool abbreviated_auxiliary = false;
 
   Chunk() = default;
   Chunk(Table* t,
@@ -35,7 +37,8 @@ struct Chunk {
         const table::Entry* e,
         size_t m,
         double cr = 0.0,
-        double q = 0.0)
+        double q = 0.0,
+        bool abbreviated = false)
       : table(t),
         code(c),
         entries(e),
@@ -43,7 +46,8 @@ struct Chunk {
         cursor(0),
         matching_code_size(m),
         credibility(cr),
-        quality_len(q) {}
+        quality_len(q),
+        abbreviated_auxiliary(abbreviated) {}
   Chunk(Table* t, const TableAccessor& a, double cr = 0.0, double q = 0.0)
       : Chunk(t, a, string(), cr, q) {}
   Chunk(Table* t,
@@ -59,7 +63,8 @@ struct Chunk {
         remaining_code(r),
         matching_code_size(a.index_code().size()),
         credibility(cr),
-        quality_len(q) {}
+        quality_len(q),
+        abbreviated_auxiliary(a.abbreviated_auxiliary()) {}
 
   bool is_exact_match() const { return matching_code_size == code.size(); }
 
@@ -159,11 +164,14 @@ DictEntryIterator::DictEntryIterator()
     : query_result_(New<dictionary::QueryResult>()) {}
 
 void DictEntryIterator::AddChunk(dictionary::Chunk&& chunk) {
+  has_abbreviated_auxiliary_ |= chunk.abbreviated_auxiliary;
   query_result_->chunks.push_back(std::move(chunk));
   entry_count_ += chunk.size;
 }
 
 void DictEntryIterator::Sort() {
+  if (ordered_mode_)
+    return;
   auto& chunks = query_result_->chunks;
   // partial-sort remaining chunks, move best match to chunk_index_
   std::partial_sort(chunks.begin() + chunk_index_,
@@ -175,6 +183,21 @@ std::map<Code, double> DictEntryIterator::TopWeightsByCode(
     bool separate_readings) const {
   std::map<Code, double> result;
   constexpr double kLogScale = 18.420680743952367;
+  if (ordered_mode_) {
+    for (size_t index = ordered_index_; index < ordered_entries_.size();
+         ++index) {
+      const auto& entry = ordered_entries_[index];
+      if (!entry || !entry->IsExactMatch() || entry->remaining_code_length != 0)
+        continue;
+      const Code key = separate_readings ? entry->code : Code{};
+      auto it = result.find(key);
+      if (it == result.end())
+        result[key] = entry->weight;
+      else
+        it->second = (std::max)(it->second, entry->weight);
+    }
+    return result;
+  }
   const auto& chunks = query_result_->chunks;
   for (size_t index = chunk_index_; index < chunks.size(); ++index) {
     const auto& c = chunks[index];
@@ -200,6 +223,82 @@ DictEntryIterator DictEntryIterator::Fork() const {
   return copy;
 }
 
+namespace {
+
+size_t Utf8Length(const string& text) {
+  size_t length = 0;
+  for (auto p = text.begin(); p != text.end();) {
+    utf8::next(p, text.end());
+    ++length;
+  }
+  return length;
+}
+
+}  // namespace
+
+void DictEntryIterator::ApplyAuxiliaryOrdering() {
+  if (!has_abbreviated_auxiliary_ || ordered_mode_)
+    return;
+
+  DictEntryIterator snapshot = Fork();
+  snapshot.filter_ = nullptr;
+  vector<an<DictEntry>> entries;
+  entries.reserve(entry_count_);
+  while (!snapshot.exhausted()) {
+    snapshot.entry_.reset();
+    entries.push_back(snapshot.Peek());
+    if (!snapshot.FindNextEntry())
+      break;
+  }
+
+  vector<an<DictEntry>> ordered;
+  ordered.reserve(entries.size());
+  for (size_t begin = 0; begin < entries.size();) {
+    const bool exact = entries[begin]->IsExactMatch();
+    const int remaining = entries[begin]->remaining_code_length;
+    size_t end = begin + 1;
+    while (end < entries.size() && entries[end]->IsExactMatch() == exact &&
+           entries[end]->remaining_code_length == remaining) {
+      ++end;
+    }
+
+    vector<an<DictEntry>> ordinary;
+    vector<an<DictEntry>> auxiliary;
+    for (size_t i = begin; i < end; ++i) {
+      if (entries[i]->abbreviated_auxiliary)
+        auxiliary.push_back(entries[i]);
+      else
+        ordinary.push_back(entries[i]);
+    }
+    vector<size_t> auxiliary_lengths;
+    auxiliary_lengths.reserve(auxiliary.size());
+    for (const auto& entry : auxiliary)
+      auxiliary_lengths.push_back(Utf8Length(entry->text));
+    vector<bool> emitted(auxiliary.size(), false);
+    for (const auto& entry : ordinary) {
+      const size_t text_length = Utf8Length(entry->text);
+      for (size_t i = 0; i < auxiliary.size(); ++i) {
+        if (!emitted[i] && auxiliary_lengths[i] == text_length) {
+          ordered.push_back(auxiliary[i]);
+          emitted[i] = true;
+        }
+      }
+      ordered.push_back(entry);
+    }
+    for (size_t i = 0; i < auxiliary.size(); ++i) {
+      if (!emitted[i])
+        ordered.push_back(auxiliary[i]);
+    }
+    begin = end;
+  }
+
+  ordered_entries_ = std::move(ordered);
+  ordered_index_ = 0;
+  ordered_mode_ = true;
+  entry_count_ = ordered_entries_.size();
+  entry_.reset();
+}
+
 void DictEntryIterator::AddFilter(DictEntryFilter filter) {
   DictEntryFilterBinder::AddFilter(filter);
   // the introduced filter could invalidate the current or even all the
@@ -211,6 +310,10 @@ void DictEntryIterator::AddFilter(DictEntryFilter filter) {
 }
 
 an<DictEntry> DictEntryIterator::Peek() {
+  if (ordered_mode_)
+    return ordered_index_ < ordered_entries_.size()
+               ? ordered_entries_[ordered_index_]
+               : nullptr;
   if (!entry_ && !exhausted()) {
     // get next entry from current chunk
     const auto& chunk = query_result_->chunks[chunk_index_];
@@ -223,6 +326,7 @@ an<DictEntry> DictEntryIterator::Peek() {
     const double kS = 18.420680743952367;  // log(1e8)
     entry_->weight = e.weight - kS + chunk.credibility;
     entry_->quality_len = chunk.quality_len;
+    entry_->abbreviated_auxiliary = chunk.abbreviated_auxiliary;
     if (!chunk.remaining_code.empty()) {
       entry_->comment = "~" + chunk.remaining_code;
       entry_->remaining_code_length = chunk.remaining_code.length();
@@ -235,6 +339,12 @@ an<DictEntry> DictEntryIterator::Peek() {
 }
 
 bool DictEntryIterator::FindNextEntry() {
+  if (ordered_mode_) {
+    if (ordered_index_ >= ordered_entries_.size())
+      return false;
+    ++ordered_index_;
+    return !exhausted();
+  }
   if (exhausted()) {
     return false;
   }
@@ -262,6 +372,15 @@ bool DictEntryIterator::Next() {
 
 // Note: does not apply filters
 bool DictEntryIterator::Skip(size_t num_entries) {
+  if (ordered_mode_) {
+    if (ordered_index_ + num_entries > ordered_entries_.size()) {
+      ordered_index_ = ordered_entries_.size();
+      return false;
+    }
+    ordered_index_ += num_entries;
+    entry_.reset();
+    return true;
+  }
   while (num_entries > 0) {
     if (exhausted())
       return false;
@@ -277,6 +396,8 @@ bool DictEntryIterator::Skip(size_t num_entries) {
 }
 
 bool DictEntryIterator::exhausted() const {
+  if (ordered_mode_)
+    return ordered_index_ >= ordered_entries_.size();
   return chunk_index_ >= query_result_->chunks.size();
 }
 
@@ -334,8 +455,9 @@ static void lookup_table(Table* table,
             if (!match.success)
               continue;
             size_t matching_code_size = a.index_code().size() + match.depth;
-            (*collector)[match.end_pos].AddChunk(
-                {table, a.code(), a.entry(), matching_code_size, cr});
+            (*collector)[match.end_pos].AddChunk({table, a.code(), a.entry(),
+                                                  matching_code_size, cr, 0.0,
+                                                  a.abbreviated_auxiliary()});
             continue;
           }
           std::set<std::pair<size_t, size_t>> matches, seen;
@@ -349,8 +471,9 @@ static void lookup_table(Table* table,
             if (!SyllableGraphMatches(syllable_graph, code, text, start_pos,
                                       match.second, matching))
               continue;
-            (*collector)[match.second].AddChunk(
-                {table, code, a.entry(), matching, cr, q});
+            (*collector)[match.second].AddChunk({table, code, a.entry(),
+                                                 matching, cr, q,
+                                                 a.abbreviated_auxiliary()});
           }
         } while (a.Next());
       } else {
@@ -379,6 +502,7 @@ an<DictEntryCollector> Dictionary::Lookup(const SyllableGraph& syllable_graph,
   // for each group of equal code length, sort it and filter words
   for (auto& v : *collector) {
     v.second.Sort();
+    v.second.ApplyAuxiliaryOrdering();
     if (blacklist && !blacklist->empty()) {
       v.second.AddFilter([blacklist](an<DictEntry> entry) {
         return entry && !blacklist->count(entry->text);

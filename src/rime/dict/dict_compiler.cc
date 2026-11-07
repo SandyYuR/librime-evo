@@ -607,6 +607,7 @@ bool DictCompiler::BuildPrism(const path& schema_file,
           ReadAuxiliarySources(*auxiliary_files);
       for (const auto& item : auxiliary_characters_by_text) {
         set<string> projected_aux_codes;
+        map<string, SpellingProperties> projected_aux_properties;
         for (const auto& raw_aux_code : item.second) {
           Script projected_aux;
           projected_aux.AddSyllable(raw_aux_code);
@@ -616,6 +617,15 @@ bool DictCompiler::BuildPrism(const path& schema_file,
               if (spelling.properties.auxiliary &&
                   IsAsciiPrismKey(aux_item.first)) {
                 projected_aux_codes.insert(aux_item.first);
+                auto it = projected_aux_properties.find(aux_item.first);
+                if (it == projected_aux_properties.end() ||
+                    spelling.properties.type < it->second.type ||
+                    (spelling.properties.type == it->second.type &&
+                     spelling.properties.credibility >
+                         it->second.credibility)) {
+                  projected_aux_properties[aux_item.first] =
+                      spelling.properties;
+                }
               }
             }
           }
@@ -645,6 +655,10 @@ bool DictCompiler::BuildPrism(const path& schema_file,
             for (const auto& aux_code : projected_aux_codes) {
               const string aux_key = base_item.first + aux_code;
               Spelling remapped(base);
+              const auto aux_properties =
+                  projected_aux_properties.find(aux_code);
+              if (aux_properties != projected_aux_properties.end())
+                remapped.properties = aux_properties->second;
               remapped.properties.auxiliary = true;
               script.Merge(aux_key, SpellingProperties(), {remapped});
               ++imported_aux_entries;

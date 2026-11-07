@@ -238,3 +238,16 @@ TEST(RimeCalculusTest, AuxiliaryKeepsAnExplicitUnchangedVariant) {
   EXPECT_EQ("cd", s.str);
   EXPECT_TRUE(s.properties.auxiliary);
 }
+
+TEST(RimeCalculusTest, AuxiliaryAbbreviationHasLowerCredibility) {
+  rime::Calculus calc;
+  rime::the<rime::Calculation> c(
+      calc.Parse("aux|^([a-z])([a-z])$|$1$2|abbrev"));
+  ASSERT_TRUE(bool(c));
+  rime::Spelling s("cd");
+  ASSERT_TRUE(c->Apply(&s));
+  EXPECT_EQ("cd", s.str);
+  EXPECT_TRUE(s.properties.auxiliary);
+  EXPECT_EQ(rime::kAbbreviation, s.properties.type);
+  EXPECT_DOUBLE_EQ(std::log(0.5), s.properties.credibility);
+}

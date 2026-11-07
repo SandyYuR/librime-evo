@@ -5,6 +5,8 @@
 // 2011-07-05 GONG Chen <chen.sst@gmail.com>
 //
 #include <gtest/gtest.h>
+#include <cstdio>
+#include <fstream>
 #include <sstream>
 #include <rime/dict/dict_settings.h>
 #include <rime/dict/entry_collector.h>
@@ -13,6 +15,8 @@
 #include <rime/algo/syllabifier.h>
 #include <rime/dict/dictionary.h>
 #include <rime/dict/dict_compiler.h>
+#include <memory>
+#include <set>
 
 class RimeDictionaryTest : public ::testing::Test {
  public:
@@ -130,4 +134,82 @@ TEST(RimeAuxiliaryCompilationTest, HeaderlessImportedSourceKeepsFirstRow) {
   EXPECT_EQ("# data only", first);
   ASSERT_TRUE(bool(std::getline(input, first)));
   EXPECT_EQ("甲\tcd", first);
+}
+
+TEST(RimeAuxiliaryOrderingTest, AbbreviationPrecedesSameLengthOrdinaryEntry) {
+  constexpr const char* kDictName = "aux_order_test";
+  constexpr const char* kDictFile = "aux_order_test.dict.yaml";
+  constexpr const char* kAuxFile = "aux_order_test_aux.yaml";
+  constexpr const char* kSchemaFile = "aux_order_test.schema.yaml";
+  constexpr const char* kTableFile = "aux_order_test.table.bin";
+  constexpr const char* kPrismFile = "aux_order_test.prism.bin";
+
+  std::ofstream(kDictFile) << R"YAML(---
+name: aux_order_test
+version: "1.0"
+sort: by_weight
+...
+甲	ab	1
+甲乙	ab xy	1000
+丙	ab xy	100
+)YAML";
+  std::ofstream(kAuxFile) << "甲\txy\n";
+  std::ofstream(kSchemaFile) << R"YAML(speller:
+  aux_dictionary: aux_order_test_aux
+  aux_algebra:
+    abbrev:
+      - "aux|^([a-z])([a-z])$|$1$2|abbrev"
+)YAML";
+
+  rime::the<rime::Dictionary> dict(new rime::Dictionary(
+      kDictName, {}, {rime::New<rime::Table>(rime::path{kTableFile})},
+      rime::New<rime::Prism>(rime::path{kPrismFile})));
+  dict->Remove();
+  rime::DictCompiler compiler(dict.get());
+  compiler.set_auxiliary_type("abbrev");
+  ASSERT_TRUE(compiler.Compile(rime::path{kSchemaFile}));
+  ASSERT_TRUE(dict->Load());
+
+  int base_value = -1;
+  ASSERT_TRUE(dict->prism()->GetValue("ab", &base_value));
+  auto base = dict->prism()->QuerySpelling(base_value);
+  ASSERT_FALSE(base.exhausted());
+  const auto base_id = base.syllable_id();
+
+  rime::Syllabifier syllabifier;
+  syllabifier.SetAuxiliaryLookup(
+      [base_id](const rime::string& input,
+                std::vector<rime::AuxGraphMatch>* matches) {
+        if (input == "abxy") {
+          matches->push_back({4, base_id,
+                              std::make_shared<const std::set<rime::string>>(
+                                  std::set<rime::string>{"甲"}),
+                              rime::kAbbreviation, 0.0});
+        }
+      });
+  rime::SyllableGraph graph;
+  ASSERT_EQ(4u, syllabifier.BuildSyllableGraph("abxy", *dict->prism(), &graph));
+
+  auto result = dict->Lookup(graph, 0);
+  ASSERT_TRUE(result);
+  auto found = result->find(4);
+  ASSERT_NE(result->end(), found);
+  auto& entries = found->second;
+  ASSERT_FALSE(entries.exhausted());
+  EXPECT_EQ("甲乙", entries.Peek()->text);
+  EXPECT_FALSE(entries.Peek()->abbreviated_auxiliary);
+  ASSERT_TRUE(entries.Next());
+  EXPECT_EQ("甲", entries.Peek()->text);
+  EXPECT_TRUE(entries.Peek()->abbreviated_auxiliary);
+  ASSERT_TRUE(entries.Next());
+  EXPECT_EQ("丙", entries.Peek()->text);
+  EXPECT_FALSE(entries.Peek()->abbreviated_auxiliary);
+
+  dict.reset();
+  std::remove(kDictFile);
+  std::remove(kAuxFile);
+  std::remove(kSchemaFile);
+  std::remove(kTableFile);
+  std::remove(kPrismFile);
+  std::remove("aux_order_test.reverse.bin");
 }

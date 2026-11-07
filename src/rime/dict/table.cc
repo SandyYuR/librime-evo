@@ -24,32 +24,38 @@ const size_t kTableFormatPrefixLen = sizeof(kTableFormatPrefix) - 1;
 TableAccessor::TableAccessor(const Code& index_code,
                              const List<table::Entry>* list,
                              double credibility,
-                             double quality_len)
+                             double quality_len,
+                             bool abbreviated_auxiliary)
     : index_code_(index_code),
       entries_(list->at.get()),
       size_(list->size),
       credibility_(credibility),
-      quality_len_(quality_len) {}
+      quality_len_(quality_len),
+      abbreviated_auxiliary_(abbreviated_auxiliary) {}
 
 TableAccessor::TableAccessor(const Code& index_code,
                              const Array<table::Entry>* array,
                              double credibility,
-                             double quality_len)
+                             double quality_len,
+                             bool abbreviated_auxiliary)
     : index_code_(index_code),
       entries_(array->at),
       size_(array->size),
       credibility_(credibility),
-      quality_len_(quality_len) {}
+      quality_len_(quality_len),
+      abbreviated_auxiliary_(abbreviated_auxiliary) {}
 
 TableAccessor::TableAccessor(const Code& index_code,
                              const table::TailIndex* code_map,
                              double credibility,
-                             double quality_len)
+                             double quality_len,
+                             bool abbreviated_auxiliary)
     : index_code_(index_code),
       long_entries_(code_map->at),
       size_(code_map->size),
       credibility_(credibility),
-      quality_len_(quality_len) {}
+      quality_len_(quality_len),
+      abbreviated_auxiliary_(abbreviated_auxiliary) {}
 
 bool TableAccessor::exhausted() const {
   if (entries_ || long_entries_) {
@@ -102,7 +108,8 @@ bool TableAccessor::Next() {
 bool TableQuery::Advance(SyllableId syllable_id,
                          double credibility,
                          double quality_len,
-                         size_t last_pos) {
+                         size_t last_pos,
+                         bool abbreviated_auxiliary) {
   if (!Walk(syllable_id)) {
     return false;
   }
@@ -111,6 +118,8 @@ bool TableQuery::Advance(SyllableId syllable_id,
   credibility_.push_back(credibility_sum() + credibility);
   quality_len_.push_back(quality_len_sum() + quality_len);
   last_pos_.push_back(last_pos);
+  abbreviated_auxiliary_.push_back(this->abbreviated_auxiliary() ||
+                                   abbreviated_auxiliary);
   return true;
 }
 
@@ -123,6 +132,7 @@ bool TableQuery::Backdate() {
     credibility_.pop_back();
     quality_len_.pop_back();
     last_pos_.pop_back();
+    abbreviated_auxiliary_.pop_back();
   }
   return true;
 }
@@ -133,6 +143,7 @@ void TableQuery::Reset() {
   credibility_.clear();
   quality_len_.clear();
   last_pos_.clear();
+  abbreviated_auxiliary_.clear();
 }
 
 inline static bool node_less(const table::TrunkIndexNode& a,
@@ -189,16 +200,19 @@ inline static Code add_syllable(Code code, SyllableId syllable_id) {
 
 TableAccessor TableQuery::Access(SyllableId syllable_id,
                                  double credibility,
-                                 double quality_len) const {
+                                 double quality_len,
+                                 bool abbreviated_auxiliary) const {
   credibility += credibility_sum();
   quality_len += quality_len_sum();
+  abbreviated_auxiliary =
+      this->abbreviated_auxiliary() || abbreviated_auxiliary;
   if (level_ == 0) {
     if (!lv1_index_ || syllable_id < 0 ||
         syllable_id >= static_cast<SyllableId>(lv1_index_->size))
       return TableAccessor();
     auto node = &lv1_index_->at[syllable_id];
     return TableAccessor(add_syllable(index_code_, syllable_id), &node->entries,
-                         credibility, quality_len);
+                         credibility, quality_len, abbreviated_auxiliary);
   } else if (level_ == 1 || level_ == 2) {
     auto index = (level_ == 1) ? lv2_index_ : lv3_index_;
     if (!index)
@@ -207,11 +221,12 @@ TableAccessor TableQuery::Access(SyllableId syllable_id,
     if (node == index->end())
       return TableAccessor();
     return TableAccessor(add_syllable(index_code_, syllable_id), &node->entries,
-                         credibility, quality_len);
+                         credibility, quality_len, abbreviated_auxiliary);
   } else if (level_ == 3) {
     if (!lv4_index_)
       return TableAccessor();
-    return TableAccessor(index_code_, lv4_index_, credibility, quality_len);
+    return TableAccessor(index_code_, lv4_index_, credibility, quality_len,
+                         abbreviated_auxiliary);
   }
   return TableAccessor();
 }
@@ -610,16 +625,19 @@ bool Table::Query(const SyllableGraph& syll_graph,
 
         // 全碼匹配長度積分
         bool is_normal_spelling = props->type == kNormalSpelling;
+        bool is_abbreviated_auxiliary =
+            props->auxiliary_chars && props->type == kAbbreviation;
         double delta_quality_len =
             (is_normal_spelling ? 1.0 : 0.0) * (end_pos - current_pos);
         TableAccessor accessor =
-            query.Access(syll_id, next_credibility, delta_quality_len);
+            query.Access(syll_id, next_credibility, delta_quality_len,
+                         is_abbreviated_auxiliary);
         if (!accessor.exhausted()) {
           (*result)[end_pos].push_back(accessor);
         }
         if (end_pos < syll_graph.interpreted_length &&
             query.Advance(syll_id, next_credibility, delta_quality_len,
-                          current_pos)) {
+                          current_pos, is_abbreviated_auxiliary)) {
           q.push({end_pos, query});
           query.Backdate();
         }

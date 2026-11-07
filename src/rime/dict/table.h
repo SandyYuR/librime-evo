@@ -99,15 +99,18 @@ class TableAccessor {
   TableAccessor(const Code& index_code,
                 const List<table::Entry>* entries,
                 double credibility = 0.0,
-                double quality_len = 0.0);
+                double quality_len = 0.0,
+                bool abbreviated_auxiliary = false);
   TableAccessor(const Code& index_code,
                 const Array<table::Entry>* entries,
                 double credibility = 0.0,
-                double quality_len = 0.0);
+                double quality_len = 0.0,
+                bool abbreviated_auxiliary = false);
   TableAccessor(const Code& index_code,
                 const table::TailIndex* code_map,
                 double credibility = 0.0,
-                double quality_len = 0.0);
+                double quality_len = 0.0,
+                bool abbreviated_auxiliary = false);
 
   RIME_DLL bool Next();
 
@@ -119,6 +122,7 @@ class TableAccessor {
   Code code() const;
   double credibility() const { return credibility_; }
   double quality_len() const { return quality_len_; }
+  bool abbreviated_auxiliary() const { return abbreviated_auxiliary_; }
 
  private:
   Code index_code_;
@@ -128,6 +132,7 @@ class TableAccessor {
   size_t cursor_ = 0;
   double credibility_ = 0.0;
   double quality_len_ = 0.0;
+  bool abbreviated_auxiliary_ = false;
 };
 
 using TableQueryResult = map<int, vector<TableAccessor>>;
@@ -140,13 +145,15 @@ class TableQuery {
 
   TableAccessor Access(SyllableId syllable_id,
                        double credibility = 0.0,
-                       double quality_len = 0.0) const;
+                       double quality_len = 0.0,
+                       bool abbreviated_auxiliary = false) const;
 
   // down to next level
   bool Advance(SyllableId syllable_id,
                double credibility = 0.0,
                double quality_len = 0.0,
-               size_t last_pos = 0);
+               size_t last_pos = 0,
+               bool abbreviated_auxiliary = false);
 
   // up one level
   bool Backdate();
@@ -162,6 +169,9 @@ class TableQuery {
   double quality_len_sum() const {
     return quality_len_.empty() ? 0 : quality_len_.back();
   }
+  bool abbreviated_auxiliary() const {
+    return !abbreviated_auxiliary_.empty() && abbreviated_auxiliary_.back();
+  }
   size_t last_pos() const { return last_pos_.empty() ? 0 : last_pos_.back(); }
 
  protected:
@@ -170,6 +180,7 @@ class TableQuery {
   vector<double> credibility_;
   vector<double> quality_len_;
   vector<size_t> last_pos_;
+  vector<bool> abbreviated_auxiliary_;
 
  private:
   bool Walk(SyllableId syllable_id);
