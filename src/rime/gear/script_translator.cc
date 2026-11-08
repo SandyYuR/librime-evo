@@ -51,7 +51,7 @@ struct SyllabifyTask {
                 size_t next_pos)>
       push;
   function<void(SyllabifyTask* task, size_t depth)> pop;
-  vector<string> characters;
+  vector<string> characters{};
 };
 
 static vector<string> SplitCharacters(const string& text) {
@@ -158,9 +158,9 @@ class ScriptTranslation : public Translation {
             start,
             translator->auxiliary_enabled() ? translator->auxiliary_matcher()
                                             : nullptr)),
-        enable_correction_(corrector),
         max_sentences_(max_sentences),
         sentence_cutoff_threshold_(sentence_cutoff_threshold),
+        enable_correction_(corrector),
         auxiliary_suffix_(auxiliary_suffix) {
     set_exhausted(true);
   }
@@ -459,11 +459,11 @@ Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
   Spans result;
   vector<size_t> vertices;
   vertices.push_back(start_);
-  SyllabifyTask task{
-      phrase->code(), syllable_graph_, phrase->end() - start_,
-      [&](SyllabifyTask* task, size_t depth, size_t current_pos,
-          size_t next_pos) { vertices.push_back(start_ + next_pos); },
-      [&](SyllabifyTask* task, size_t depth) { vertices.pop_back(); }};
+  SyllabifyTask task{phrase->code(), syllable_graph_, phrase->end() - start_,
+                     [&](SyllabifyTask*, size_t, size_t, size_t next_pos) {
+                       vertices.push_back(start_ + next_pos);
+                     },
+                     [&](SyllabifyTask*, size_t) { vertices.pop_back(); }};
   task.characters = SplitCharacters(phrase->text());
   if (syllabify_dfs(&task, 0, phrase->start() - start_)) {
     result.set_vertices(std::move(vertices));
@@ -503,7 +503,7 @@ bool ScriptSyllabifier::IsCorrection(const Code& code,
         path_attributes.push_back(false);
       },
       // pop
-      [&](SyllabifyTask* task, size_t depth) { path_attributes.pop_back(); }};
+      [&](SyllabifyTask*, size_t) { path_attributes.pop_back(); }};
 
   if (syllabify_dfs(&task, 0, 0)) {
     for (bool is_correction : path_attributes) {
@@ -518,22 +518,21 @@ string ScriptSyllabifier::GetPreeditString(const Phrase& cand) const {
   const auto& delimiters = translator_->delimiters();
   std::stack<size_t> lengths;
   string output;
-  SyllabifyTask task{cand.matching_code(), syllable_graph_, cand.end() - start_,
-                     [&](SyllabifyTask* task, size_t depth, size_t current_pos,
-                         size_t next_pos) {
-                       size_t len = output.length();
-                       if (depth > 0 && len > 0 &&
-                           delimiters.find(output[len - 1]) == string::npos) {
-                         output += delimiters.at(0);
-                       }
-                       output +=
-                           input_.substr(current_pos, next_pos - current_pos);
-                       lengths.push(len);
-                     },
-                     [&](SyllabifyTask* task, size_t depth) {
-                       output.resize(lengths.top());
-                       lengths.pop();
-                     }};
+  SyllabifyTask task{
+      cand.matching_code(), syllable_graph_, cand.end() - start_,
+      [&](SyllabifyTask*, size_t depth, size_t current_pos, size_t next_pos) {
+        size_t len = output.length();
+        if (depth > 0 && len > 0 &&
+            delimiters.find(output[len - 1]) == string::npos) {
+          output += delimiters.at(0);
+        }
+        output += input_.substr(current_pos, next_pos - current_pos);
+        lengths.push(len);
+      },
+      [&](SyllabifyTask*, size_t) {
+        output.resize(lengths.top());
+        lengths.pop();
+      }};
   task.characters = SplitCharacters(cand.text());
   if (syllabify_dfs(&task, 0, cand.start() - start_)) {
     return translator_->FormatPreedit(output);
@@ -752,15 +751,10 @@ an<Candidate> ScriptTranslation::Peek() {
   return candidate_;
 }
 
-static bool always_true() {
-  return true;
-}
-
 template <typename T>
-inline static bool prefer_user_phrase(
-    T user_phrase_weight,
-    T sys_phrase_weight,
-    function<bool()> compare_on_tie = always_true) {
+inline static bool prefer_user_phrase(T user_phrase_weight,
+                                      T sys_phrase_weight,
+                                      function<bool()> compare_on_tie) {
   return user_phrase_weight > sys_phrase_weight ||
          (user_phrase_weight == sys_phrase_weight && compare_on_tie());
 }
@@ -879,7 +873,8 @@ void ScriptTranslation::EnrollEntries(
   if (query_result) {
     for (auto& y : *query_result) {
       DictEntryList& homophones = entries_by_end_pos[y.first];
-      while (homophones.size() < translator_->max_homophones() &&
+      while (homophones.size() <
+                 static_cast<size_t>(translator_->max_homophones()) &&
              !y.second.exhausted()) {
         homophones.push_back(y.second.Peek());
         if (!y.second.Next())

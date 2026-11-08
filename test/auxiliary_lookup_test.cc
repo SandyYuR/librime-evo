@@ -114,8 +114,9 @@ sort: by_weight
         "aux_path_test", vector<string>{},
         vector<of<Table>>{New<Table>(path{"aux_path_test.table.bin"})},
         New<Prism>(path{"aux_path_test." + type + ".prism.bin"}));
-    if (load)
+    if (load) {
       EXPECT_TRUE(dict->Load());
+    }
     return dict;
   }
 

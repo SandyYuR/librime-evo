@@ -80,6 +80,7 @@ version: "1.0"
     std::remove("zrm.prism.bin");
     std::remove("build_dict_rules.yaml");
     std::remove("build_dict_encoder.userdb.tsv");
+    std::filesystem::remove(path{"build_dict_用户.dict.yaml"});
   }
 
   void WriteSchema(const string& definitions, bool translator = false) {
@@ -457,6 +458,22 @@ TEST_F(RimeBuildDictionaryTest, TableEncoderLoadsStemsAndCreatesUserPhrase) {
   EXPECT_EQ("nr", codes.front());
   ASSERT_TRUE(table->encoder()->EncodePhrase("你好", "1"));
   EXPECT_NE(string::npos, Query(translator.get(), "nh").find("你好"));
+}
+
+TEST_F(RimeBuildDictionaryTest, MemoryEstimateReadsUnicodeHeaderAndImports) {
+  const path unicode_source{"build_dict_用户.dict.yaml"};
+  {
+    std::ofstream header(
+        static_cast<const std::filesystem::path&>(unicode_source));
+    header << "---\nname: build_dict_用户\nversion: '1.0'\n"
+              "import_tables: [build_dict_source]\n...\n";
+  }
+  const auto original = DictCompiler::EstimateMemory("build_dict_用户");
+  {
+    std::ofstream source("build_dict_source.dict.yaml", std::ios::app);
+    source << "extra\t额外\t1\n";
+  }
+  EXPECT_GT(DictCompiler::EstimateMemory("build_dict_用户"), original);
 }
 
 TEST_F(RimeBuildDictionaryTest, PacksSourcesShareOneIndependentTable) {

@@ -80,11 +80,13 @@ class Phrase : public Candidate {
   }
   bool is_exact_match() const {
     return entry_->matching_code_size == 0 ||
-           entry_->matching_code_size == entry_->code.size();
+           static_cast<size_t>(entry_->matching_code_size) ==
+               entry_->code.size();
   }
   bool is_predicitve_match() const {
     return entry_->matching_code_size != 0 &&
-           entry_->matching_code_size < entry_->code.size();
+           static_cast<size_t>(entry_->matching_code_size) <
+               entry_->code.size();
   }
   Code matching_code() const {
     return entry_->matching_code_size == 0

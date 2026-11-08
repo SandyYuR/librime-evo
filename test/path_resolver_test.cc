@@ -43,7 +43,7 @@ class SafePathTest : public ::testing::Test {
 };
 
 TEST_F(SafePathTest, RejectsUnsafeNames) {
-  for (const std::string& s :
+  for (const char* s :
        {"", "../secret", "data/../source", "./data", "/etc/passwd", "C:/secret",
         "\\\\server\\path", "data//source", "data/", "data\\file", "data/."}) {
     EXPECT_FALSE(safe_path::ValidRelativeName(s)) << s;
@@ -93,9 +93,10 @@ TEST_F(SafePathTest, WritableRejectsSymlinkTarget) {
   std::error_code ec;
   fs::create_symlink(outside_ / "secret.txt",
                      root_ / "export" / "lua" / "escape.tsv", ec);
-  if (!ec)
+  if (!ec) {
     EXPECT_TRUE(
         safe_path::WritableFile(root_, "export/lua/escape.tsv").empty());
+  }
   EXPECT_TRUE(safe_path::SafeDatabaseLocation(root_, root_ / "lua.userdb"));
   fs::create_directory(root_ / "lua.userdb");
   EXPECT_TRUE(safe_path::SafeDatabaseLocation(root_, root_ / "lua.userdb"));
@@ -125,9 +126,10 @@ TEST_F(SafePathTest, RestoreNeedsNonSymlinkPath) {
                   .empty());
   std::error_code ec;
   fs::create_symlink(outside_ / "secret.txt", root_ / "redirect.txt", ec);
-  if (!ec)
+  if (!ec) {
     EXPECT_TRUE(safe_path::ExistingFileNoSymlinks(root_, root_ / "redirect.txt")
                     .empty());
+  }
 }
 
 }  // namespace

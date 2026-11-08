@@ -12,7 +12,10 @@
 
 namespace rime {
 
-Menu::Menu() : merged_(new MergedTranslation(candidates_)), result_(merged_) {}
+Menu::Menu() {
+  merged_.reset(new MergedTranslation(candidates_));
+  result_ = merged_;
+}
 
 void Menu::AddTranslation(an<Translation> translation) {
   *merged_ += translation;

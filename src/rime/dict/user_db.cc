@@ -659,7 +659,7 @@ void UserDbMerger::CloseMerge() {
 
 UserDbImporter::UserDbImporter(Db* db) : db_(db) {}
 
-bool UserDbImporter::MetaPut(const string& key, const string& value) {
+bool UserDbImporter::MetaPut(const string&, const string&) {
   return true;
 }
 

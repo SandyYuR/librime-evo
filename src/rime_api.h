@@ -66,9 +66,15 @@ typedef uintptr_t RimeSessionId;
   memset((char*)&(var) + sizeof((var).data_size), 0, (var).data_size)
 
 //! Define a variable of Type
+#ifdef __cplusplus
+#define RIME_STRUCT(Type, var) \
+  Type var = {};               \
+  RIME_STRUCT_INIT(Type, var);
+#else
 #define RIME_STRUCT(Type, var) \
   Type var = {0};              \
   RIME_STRUCT_INIT(Type, var);
+#endif
 
 // tests that member is a non-null pointer in self-versioned struct *p.
 #define RIME_PROVIDED(p, member) \
@@ -554,17 +560,17 @@ RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)(void);
  *  and rime_<module_name>_finalize().
  *  \sa core_module.cc for an example.
  */
-#define RIME_REGISTER_MODULE(name)                       \
-  void rime_require_module_##name() {}                   \
-  RIME_MODULE_INITIALIZER(rime_register_module_##name) { \
-    static RimeModule module = {0};                      \
-    if (!module.data_size) {                             \
-      RIME_STRUCT_INIT(RimeModule, module);              \
-      module.module_name = #name;                        \
-      module.initialize = rime_##name##_initialize;      \
-      module.finalize = rime_##name##_finalize;          \
-    }                                                    \
-    RimeRegisterModule(&module);                         \
+#define RIME_REGISTER_MODULE(name)                          \
+  void rime_require_module_##name() {}                      \
+  RIME_MODULE_INITIALIZER(rime_register_module_##name) {    \
+    static RimeModule module = {0, NULL, NULL, NULL, NULL}; \
+    if (!module.data_size) {                                \
+      RIME_STRUCT_INIT(RimeModule, module);                 \
+      module.module_name = #name;                           \
+      module.initialize = rime_##name##_initialize;         \
+      module.finalize = rime_##name##_finalize;             \
+    }                                                       \
+    RimeRegisterModule(&module);                            \
   }
 
 /*!
@@ -574,7 +580,7 @@ RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)(void);
   void rime_require_module_##name() {}                          \
   static void rime_customize_module_##name(RimeModule* module); \
   RIME_MODULE_INITIALIZER(rime_register_module_##name) {        \
-    static RimeModule module = {0};                             \
+    static RimeModule module = {0, NULL, NULL, NULL, NULL};     \
     if (!module.data_size) {                                    \
       RIME_STRUCT_INIT(RimeModule, module);                     \
       module.module_name = #name;                               \

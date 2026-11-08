@@ -88,7 +88,7 @@ RIME_DEPRECATED Bool RimeStartMaintenance(Bool full_check) {
   return True;
 }
 
-RIME_DEPRECATED Bool RimeStartMaintenanceOnWorkspaceChange() {
+RIME_DEPRECATED Bool RimeStartMaintenanceOnWorkspaceChange [[maybe_unused]]() {
   return RimeStartMaintenance(False);
 }
 
@@ -668,7 +668,7 @@ struct RimeConfigIteratorImpl {
   string prefix;
   string key;
   string path;
-  RimeConfigIteratorImpl<T>(T& container, const string& root_path)
+  RimeConfigIteratorImpl(T& container, const string& root_path)
       : iter(container.begin()), end(container.end()) {
     if (root_path.empty() || root_path == "/") {
       // prefix is empty
@@ -1177,7 +1177,7 @@ void RimeGetSyncDirSecure(char* dir, size_t buffer_size);
 const char* RimeGetVersion();
 
 RIME_API RIME_FLAVORED(RimeApi) * RIME_FLAVORED(rime_get_api)() {
-  static RIME_FLAVORED(RimeApi) s_api = {0};
+  static RIME_FLAVORED(RimeApi) s_api = {};
   if (!s_api.data_size) {
     RIME_STRUCT_INIT(RIME_FLAVORED(RimeApi), s_api);
     s_api.setup = &RimeSetup;

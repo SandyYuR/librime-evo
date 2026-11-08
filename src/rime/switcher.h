@@ -72,6 +72,8 @@ class SwitcherCommand {
   const string& keyword() const { return keyword_; }
 
  protected:
+  ~SwitcherCommand() = default;
+
   string keyword_;
 };
 

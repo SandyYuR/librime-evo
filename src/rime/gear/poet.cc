@@ -26,7 +26,7 @@ struct Line {
   const DictEntry* entry;
   size_t end_pos;
   double weight;
-  size_t text_hash;  // for dedup
+  size_t text_hash = 0;  // for dedup
 
   static const Line kEmpty;
 
@@ -173,17 +173,14 @@ struct DynamicProgramming {
   static void Initiate(State& initial_state) { initial_state = Line::kEmpty; }
 
   static void ForEachCandidate(const State& state,
-                               Poet::Compare compare,
+                               Poet::Compare,
                                UpdateLineCandidate update) {
     update(state);
   }
 
-  static Line& BestLineToUpdate(State& state, const Line& new_line) {
-    return state;
-  }
+  static Line& BestLineToUpdate(State& state, const Line&) { return state; }
 
-  static const Line& BestLineInState(const State& final_state,
-                                     Poet::Compare compare) {
+  static const Line& BestLineInState(const State& final_state, Poet::Compare) {
     return final_state;
   }
 };
@@ -233,7 +230,7 @@ an<Sentence> Poet::MakeSentenceWithStrategy(const WordGraph& graph,
   auto found = states.find(total_length);
   if (found == states.end() || found->second.empty())
     return nullptr;
-  const Line& best = Strategy::BestLineInState(found->second, compare_);
+  const Line best = Strategy::BestLineInState(found->second, compare_);
   auto sentence = New<Sentence>(language_);
   for (const auto* c : best.components()) {
     if (!c->entry)

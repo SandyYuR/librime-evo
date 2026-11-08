@@ -98,7 +98,7 @@ TEST(AuxiliarySuffixSegmentorTest, AffixPrefixIsNotConsumedAsAuxiliary) {
       Ticket(&schema, "auxiliary_suffix_segmentor"));
 
   // 单反引号是双反引号前缀的输入中间态。
-  for (const string& input : {"`", "``", "``ni", "``ni`z"}) {
+  for (const char* input : {"`", "``", "``ni", "``ni`z"}) {
     Segmentation segmentation;
     segmentation.Reset(input);
     EXPECT_TRUE(suffix.Proceed(&segmentation)) << input;
@@ -127,7 +127,7 @@ TEST(AuxiliarySuffixSegmentorTest, RequiresAlphabeticSpellingBeforeSuffix) {
   Schema schema = MakeSchema();
   AuxiliarySuffixSegmentor suffix(
       Ticket(&schema, "auxiliary_suffix_segmentor"));
-  for (const string& input :
+  for (const char* input :
        {"`", "``", "``ni", "``ni`z", "`ni", "1ni`z", "_ni`z", "'ni`z"}) {
     Segmentation segmentation;
     segmentation.Reset(input);

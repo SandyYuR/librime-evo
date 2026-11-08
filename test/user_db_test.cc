@@ -398,8 +398,9 @@ TEST(RimeUserDbStateTest, CanonicalSnapshotOnly) {
 TEST(RimeUserDbStateTest, MergeDatabaseClockUsesMaximum) {
   const path test_file("user_db_clock_test.txt");
   TestDb db(test_file, "user_db_clock_test");
-  if (db.Exists())
+  if (db.Exists()) {
     ASSERT_TRUE(db.Remove());
+  }
   ASSERT_TRUE(db.Open());
   ASSERT_TRUE(db.MetaUpdate("/manual_clock", "100"));
   {
@@ -420,8 +421,9 @@ TEST(RimeUserDbStateTest, MergeDatabaseClockUsesMaximum) {
 TEST(RimeUserDbStateTest, RealMergerPreservesIndependentManualAndAutomatic) {
   const path test_file("user_db_original_merge_test.txt");
   TestDb db(test_file, "user_db_original_merge_test");
-  if (db.Exists())
+  if (db.Exists()) {
     ASSERT_TRUE(db.Remove());
+  }
   ASSERT_TRUE(db.Open());
   ASSERT_TRUE(db.MetaUpdate("/tick", "210"));
   ASSERT_TRUE(db.MetaUpdate("/manual_clock", "100"));
@@ -465,8 +467,9 @@ TEST(RimeUserDbStateTest, ManualModeDoesNotWriteAutomaticDeletion) {
   using RankDb = UserDbWrapper<LevelDb>;
   const path file("manual_mode_deletion.userdb");
   auto db = New<RankDb>(file, "manual_mode_deletion");
-  if (db->Exists())
+  if (db->Exists()) {
     ASSERT_TRUE(db->Remove());
+  }
   ASSERT_TRUE(db->Open());
   const string key("ce shi \t测试");
   const string original("3,1.5,10,2,1");
@@ -489,8 +492,9 @@ TEST(RimeUserDbStateTest, ManualModeDoesNotWriteAutomaticDeletion) {
 TEST(RimeUserDbManualOrderTest, MoveSelectedWithoutNeighborRecord) {
   using RankDb = UserDbWrapper<LevelDb>;
   RankDb db(path{"manual_position_single.userdb"}, "manual_position_single");
-  if (db.Exists())
+  if (db.Exists()) {
     ASSERT_TRUE(db.Remove());
+  }
   ASSERT_TRUE(db.Open());
   ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,0,0"));
   ASSERT_TRUE(user_manual_order::MoveAdjacent(&db, "ni ", "泥", "", "", 3, -1));
@@ -509,8 +513,9 @@ TEST(RimeUserDbManualOrderTest, SwapAlreadyPinnedDifferentCodes) {
   using RankDb = UserDbWrapper<LevelDb>;
   RankDb db(path{"manual_position_cross_code.userdb"},
             "manual_position_cross_code");
-  if (db.Exists())
+  if (db.Exists()) {
     ASSERT_TRUE(db.Remove());
+  }
   ASSERT_TRUE(db.Open());
   ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,3,1"));
   ASSERT_TRUE(db.Update("ni3 \t尼", "5,2,12,2,2"));
@@ -534,8 +539,9 @@ TEST(RimeUserDbManualOrderTest, SameCodeOccupiedPositionSwaps) {
   using RankDb = UserDbWrapper<LevelDb>;
   RankDb db(path{"manual_position_collision.userdb"},
             "manual_position_collision");
-  if (db.Exists())
+  if (db.Exists()) {
     ASSERT_TRUE(db.Remove());
+  }
   ASSERT_TRUE(db.Open());
   ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,3,1"));
   ASSERT_TRUE(db.Update("ni \t你", "1,2,11,2,2"));
@@ -556,8 +562,9 @@ TEST(RimeUserDbManualOrderTest, UnpinnedNeighborWithDifferentCodeIsIgnored) {
   using RankDb = UserDbWrapper<LevelDb>;
   RankDb db(path{"manual_position_other_code.userdb"},
             "manual_position_other_code");
-  if (db.Exists())
+  if (db.Exists()) {
     ASSERT_TRUE(db.Remove());
+  }
   ASSERT_TRUE(db.Open());
   ASSERT_TRUE(db.Update("ni \t泥", "3,1,10,0,0"));
   ASSERT_TRUE(db.Update("ni3 \t尼", "1,2,11,0,0"));

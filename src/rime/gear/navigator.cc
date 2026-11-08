@@ -100,7 +100,7 @@ ProcessResult Navigator::ProcessKeyEvent(const KeyEvent& key_event) {
                                               FallbackOptions::IgnoreShift);
 }
 
-void Navigator::OnSelect(Context* ctx) {
+void Navigator::OnSelect(Context*) {
   spans_.Clear();
 }
 

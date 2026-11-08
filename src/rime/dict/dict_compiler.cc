@@ -100,7 +100,7 @@ uint64_t DictCompiler::EstimateMemory(const string& dict_name,
       Service::instance().CreateResourceResolver({"source_file", "", ""}));
   const path source =
       resolver->ResolvePath(dict_name + (auxiliary ? ".yaml" : ".dict.yaml"));
-  std::ifstream stream(source);
+  std::ifstream stream(static_cast<const std::filesystem::path&>(source));
   DictSettings settings;
   set<path> sources{source};
   if (!auxiliary && stream && settings.LoadDictHeader(stream)) {

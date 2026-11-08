@@ -95,7 +95,7 @@ bool AuxiliaryMatcher::LookupAuxiliary(const string& text,
   if (!database_)
     return false;
   vector<AuxiliaryCode> codes;
-  const bool found = database_->ReverseLookup(text, &codes);
+  database_->ReverseLookup(text, &codes);
   for (const auto& code : codes)
     result->push_back(code.code);
   auxiliary_cache_[text] = *result;
