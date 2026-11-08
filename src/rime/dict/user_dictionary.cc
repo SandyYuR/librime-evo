@@ -20,6 +20,7 @@
 #include <rime/algo/syllabifier.h>
 #include <rime/algo/strings.h>
 #include <rime/dict/db.h>
+#include <rime/dict/level_db.h>
 #include <rime/dict/table.h>
 #include <rime/dict/user_dictionary.h>
 #include <rime/dict/user_manual_order.h>
@@ -243,7 +244,21 @@ bool UserDictionary::Load() {
       return false;
     }
   }
+#if RIME_USER_DICT_CACHE_ENABLED
+  if (auto level_db = dynamic_cast<LevelDb*>(db_.get()))
+    level_db->EnableQueryCache();
+#endif
   load_valid_ = true;
+  return true;
+}
+
+bool UserDictionary::Reload() {
+  if (!Load())
+    return false;
+#if RIME_USER_DICT_CACHE_ENABLED
+  if (auto level_db = dynamic_cast<LevelDb*>(db_.get()))
+    return level_db->RebuildQueryCache();
+#endif
   return true;
 }
 

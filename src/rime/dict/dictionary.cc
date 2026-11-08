@@ -543,19 +543,21 @@ an<DictEntryCollector> Dictionary::Lookup(const SyllableGraph& syllable_graph,
     lookup_table(table.get(), collector.get(), syllable_graph, start_pos,
                  predict_word, initial_credibility);
   }
-  if (collector->empty())
-    return nullptr;
-  // for each group of equal code length, sort it and filter words
-  for (auto& v : *collector) {
-    v.second.Sort();
-    v.second.ApplyAuxiliaryOrdering();
+  // Every returned iterator must contain a candidate after filtering.
+  for (auto it = collector->begin(); it != collector->end();) {
+    it->second.Sort();
+    it->second.ApplyAuxiliaryOrdering();
     if (blacklist && !blacklist->empty()) {
-      v.second.AddFilter([blacklist](an<DictEntry> entry) {
+      it->second.AddFilter([blacklist](an<DictEntry> entry) {
         return entry && !blacklist->count(entry->text);
       });
     }
+    if (it->second.exhausted())
+      it = collector->erase(it);
+    else
+      ++it;
   }
-  return collector;
+  return collector->empty() ? nullptr : collector;
 }
 
 size_t Dictionary::LookupWords(DictEntryIterator* result,

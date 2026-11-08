@@ -5,10 +5,14 @@
 // 2014-12-04 Chen Gong <chen.sst@gmail.com>
 //
 
+#include <algorithm>
+#include <map>
+#include <optional>
+#include <string_view>
+#include <unordered_map>
+#include <leveldb/cache.h>
 #include <leveldb/db.h>
 #include <leveldb/write_batch.h>
-#include <optional>
-#include <unordered_map>
 #include <rime/common.h>
 #include <rime/service.h>
 #include <rime/dict/level_db.h>
@@ -17,6 +21,96 @@
 namespace rime {
 
 static const char* kMetaCharacter = "\x01";
+
+static leveldb::Cache* SharedBlockCache() {
+  // All user dictionaries share the disk block cache; queries use sorted data.
+  static leveldb::Cache* cache = leveldb::NewLRUCache(2 << 20);
+  return cache;
+}
+
+// A compact immutable base plus a bounded overlay avoids copying the full
+// dictionary on each learning update. Accessors retain their own snapshots.
+struct LevelDbSnapshot {
+  struct Record {
+    size_t offset, key_size, value_size;
+  };
+  string data;
+  vector<Record> records;
+  std::string_view Key(size_t i) const {
+    const auto& r = records[i];
+    return {data.data() + r.offset, r.key_size};
+  }
+  std::string_view Value(size_t i) const {
+    const auto& r = records[i];
+    return {data.data() + r.offset + r.key_size, r.value_size};
+  }
+};
+using LevelDbChanges = map<string, std::optional<string>>;
+
+class CachedLevelDbAccessor : public DbAccessor {
+ public:
+  CachedLevelDbAccessor(an<const LevelDbSnapshot> base,
+                        an<const LevelDbChanges> changes,
+                        const string& prefix)
+      : DbAccessor(prefix),
+        base_(std::move(base)),
+        changes_(std::move(changes)) {
+    Reset();
+  }
+  bool Reset() override { return Jump(prefix_); }
+  bool Jump(const string& key) override {
+    auto it = std::lower_bound(
+        base_->records.begin(), base_->records.end(), key,
+        [&](const LevelDbSnapshot::Record& r, const string& needle) {
+          return std::string_view(base_->data.data() + r.offset, r.key_size) <
+                 needle;
+        });
+    index_ = it - base_->records.begin();
+    changed_ = changes_->lower_bound(key);
+    return true;
+  }
+  bool exhausted() override {
+    while (index_ < base_->records.size() || changed_ != changes_->end()) {
+      const bool has_base = index_ < base_->records.size();
+      use_change_ = changed_ != changes_->end() &&
+                    (!has_base || changed_->first <= base_->Key(index_));
+      if (use_change_ && has_base && changed_->first == base_->Key(index_))
+        ++index_;
+      if (use_change_ && !changed_->second) {
+        ++changed_;
+        continue;
+      }
+      const auto key =
+          use_change_ ? std::string_view(changed_->first) : base_->Key(index_);
+      return key.size() < prefix_.size() ||
+             key.substr(0, prefix_.size()) != prefix_;
+    }
+    return true;
+  }
+  bool GetNextRecord(string* key, string* value) override {
+    if (!key || !value || exhausted())
+      return false;
+    if (use_change_) {
+      *key = changed_->first;
+      *value = *changed_->second;
+      ++changed_;
+    } else {
+      key->assign(base_->Key(index_));
+      value->assign(base_->Value(index_));
+      ++index_;
+    }
+    if (prefix_ == kMetaCharacter)
+      key->erase(0, 1);
+    return true;
+  }
+
+ private:
+  an<const LevelDbSnapshot> base_;
+  an<const LevelDbChanges> changes_;
+  size_t index_ = 0;
+  LevelDbChanges::const_iterator changed_;
+  bool use_change_ = false;
+};
 
 struct LevelDbCursor {
   leveldb::Iterator* iterator = nullptr;
@@ -52,6 +146,40 @@ struct LevelDbCursor {
 struct LevelDbWrapper {
   leveldb::DB* ptr = nullptr;
   leveldb::WriteBatch batch;
+  an<LevelDbSnapshot> snapshot;
+  an<LevelDbChanges> changes = New<LevelDbChanges>();
+
+  bool BuildQueryCache() {
+    auto next = New<LevelDbSnapshot>();
+    leveldb::ReadOptions options;
+    options.fill_cache = false;
+    std::unique_ptr<leveldb::Iterator> it(ptr->NewIterator(options));
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+      const auto key = it->key();
+      const auto value = it->value();
+      next->records.push_back({next->data.size(), key.size(), value.size()});
+      next->data.append(key.data(), key.size());
+      next->data.append(value.data(), value.size());
+    }
+    if (!it->status().ok())
+      return false;
+    snapshot = std::move(next);
+    changes = New<LevelDbChanges>();
+    return true;
+  }
+
+  void CacheChange(const string& key, const std::optional<string>& value) {
+    if (!snapshot)
+      return;
+    if (!changes.unique())
+      changes = New<LevelDbChanges>(*changes);
+    (*changes)[key] = value;
+  }
+
+  void CompactQueryCache() {
+    if (snapshot && changes->size() > 1000)
+      BuildQueryCache();
+  }
   // LevelDB Get() cannot see a pending WriteBatch. A bounded per-batch
   // overlay guarantees read-your-writes for repeated learning in one commit.
   std::unordered_map<string, std::optional<string>> pending;
@@ -59,10 +187,14 @@ struct LevelDbWrapper {
   leveldb::Status Open(const path& file_path, bool readonly) {
     leveldb::Options options;
     options.create_if_missing = !readonly;
+    options.block_cache = SharedBlockCache();
+    options.write_buffer_size = 2 << 20;
     return leveldb::DB::Open(options, file_path.string(), &ptr);
   }
 
   void Release() {
+    snapshot.reset();
+    changes = New<LevelDbChanges>();
     delete ptr;
     ptr = nullptr;
   }
@@ -87,6 +219,10 @@ struct LevelDbWrapper {
       return true;
     }
     auto status = ptr->Put(leveldb::WriteOptions(), key, value);
+    if (status.ok()) {
+      CacheChange(key, value);
+      CompactQueryCache();
+    }
     return status.ok();
   }
 
@@ -97,6 +233,10 @@ struct LevelDbWrapper {
       return true;
     }
     auto status = ptr->Delete(leveldb::WriteOptions(), key);
+    if (status.ok()) {
+      CacheChange(key, std::nullopt);
+      CompactQueryCache();
+    }
     return status.ok();
   }
 
@@ -107,6 +247,12 @@ struct LevelDbWrapper {
 
   bool CommitBatch() {
     auto status = ptr->Write(leveldb::WriteOptions(), &batch);
+    if (status.ok()) {
+      // Query iterators see committed records, just like LevelDB snapshots.
+      for (const auto& change : pending)
+        CacheChange(change.first, change.second);
+      CompactQueryCache();
+    }
     return status.ok();
   }
 };
@@ -183,7 +329,21 @@ an<DbAccessor> LevelDb::QueryAll() {
 an<DbAccessor> LevelDb::Query(const string& key) {
   if (!loaded())
     return nullptr;
+  if (query_cache_enabled_ && (db_->snapshot || db_->BuildQueryCache()))
+    return New<CachedLevelDbAccessor>(db_->snapshot, db_->changes, key);
   return New<LevelDbAccessor>(db_->CreateCursor(), key);
+}
+
+bool LevelDb::EnableQueryCache() {
+  if (!loaded())
+    return false;
+  // Populate on the first query, so unused translator handles do not scan DBs.
+  query_cache_enabled_ = true;
+  return true;
+}
+
+bool LevelDb::RebuildQueryCache() {
+  return loaded() && (!query_cache_enabled_ || db_->BuildQueryCache());
 }
 
 bool LevelDb::Fetch(const string& key, string* value) {
@@ -233,7 +393,9 @@ bool LevelDb::Restore(const path& snapshot_file) {
 
 bool LevelDb::Recover() {
   LOG(INFO) << "trying to recover db '" << name() << "'.";
-  auto status = leveldb::RepairDB(file_path().string(), leveldb::Options());
+  leveldb::Options options;
+  options.block_cache = SharedBlockCache();
+  auto status = leveldb::RepairDB(file_path().string(), options);
   if (status.ok()) {
     LOG(INFO) << "repair finished.";
     return true;

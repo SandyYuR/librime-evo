@@ -135,6 +135,11 @@ if(LevelDb_FOUND)
     include_directories(${LevelDb_INCLUDE_PATH})
 endif()
 
+# Don't let leveldb's PUBLIC -Werror turn librime warnings into errors.
+if(TARGET leveldb)
+  target_compile_options(leveldb INTERFACE -Wno-error)
+endif()
+
 find_package(Marisa REQUIRED)
 if(Marisa_FOUND)
   include_directories(${Marisa_INCLUDE_PATH})
@@ -263,6 +268,20 @@ endforeach()
 set(RIME_SETUP_EXTRA_MODULES "${list}")
 if(BUILD_SHARED_LIBS AND BUILD_SEPARATE_LIBS AND rime_plugins_objs)
   set(rime_plugins_library rime-plugins)
+endif()
+
+if(NOT WIN32)
+  add_compile_options(
+    -Wall
+    -Wextra
+    -Wundef
+    -Wnon-virtual-dtor
+    -Woverloaded-virtual
+    -Werror=return-type
+    -Werror=implicit-fallthrough
+    -Werror=format=2
+    -Werror=delete-non-virtual-dtor
+  )
 endif()
 
 add_subdirectory(src)

@@ -22,6 +22,7 @@
 #include <rime/algo/utilities.h>
 #include <rime/dict/dict_compiler.h>
 #include <rime/gear/rewriter.h>
+#include <rime/lever/compile_unit.h>
 #include <rime/lever/deployment_tasks.h>
 #include <rime/lever/rewrite_compiler.h>
 #include <rime/lever/user_dict_manager.h>
@@ -33,6 +34,8 @@
 namespace fs = std::filesystem;
 
 namespace rime {
+
+static bool MaybeCreateDirectory(path dir);
 
 DetectModifications::DetectModifications(TaskInitializer arg) {
   try {
@@ -98,7 +101,7 @@ bool InstallationUpdate::Run(Deployer* deployer) {
   string last_distro_code_name;
   string last_distro_version;
   string last_rime_version;
-  if (config.LoadFromFile(installation_info)) {
+  if (config.LoadFromFile(installation_info) && config.IsMap("")) {
     if (config.GetString("installation_id", &installation_id)) {
       LOG(INFO) << "installation info exists. installation id: "
                 << installation_id;
@@ -125,6 +128,8 @@ bool InstallationUpdate::Run(Deployer* deployer) {
     if (config.GetString("rime_version", &last_rime_version)) {
       LOG(INFO) << "previous Rime version: " << last_rime_version;
     }
+  } else {
+    deployer->sync_dir = user_data_path / "sync";
   }
   if (!installation_id.empty() &&
       last_distro_code_name == deployer->distribution_code_name &&
@@ -133,6 +138,9 @@ bool InstallationUpdate::Run(Deployer* deployer) {
     return true;
   }
   LOG(INFO) << "creating installation info.";
+  if (!config.IsMap("")) {
+    config = Config();
+  }
   time_t now = time(NULL);
   string time_str(ctime(&now));
   boost::trim(time_str);
@@ -160,6 +168,8 @@ bool InstallationUpdate::Run(Deployer* deployer) {
     config.SetString("distribution_version", deployer->distribution_version);
     LOG(INFO) << "distribution version: " << deployer->distribution_version;
   }
+  config.SetString("sync_dir", deployer->sync_dir.to_utf8_string());
+  config.SetBool("backup_config_files", deployer->backup_config_files);
   config.SetString("rime_version", RIME_VERSION);
   LOG(INFO) << "Rime version: " << RIME_VERSION;
   return config.SaveToFile(installation_info);
@@ -189,6 +199,8 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
     return false;
   }
 
+  if (!MaybeCreateDirectory(deployer->staging_dir))
+    return false;
   const bool rewrite_workspace_started =
       RewriteCompiler::BeginWorkspace(deployer);
 
@@ -197,20 +209,21 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
   int failure = 0;
   map<string, path> schemas;
   vector<string> active_schema_ids;
+  vector<pair<string, the<Config>>> prepared_schemas;
+  map<string, vector<string>> schema_units;
+  map<string, string> unit_owners;
+  CompileGraph graph;
+  auto schema_component = Config::Require("schema");
   the<ResourceResolver> resolver(Service::instance().CreateResourceResolver(
       {"schema_source_file", "", ".schema.yaml"}));
+  the<ResourceResolver> compiled_resolver(
+      Service::instance().CreateDeployedResourceResolver(
+          {"compiled_schema", "", ".schema.yaml"}));
   auto build_schema = [&](const string& schema_id, bool as_dependency = false) {
-    if (schemas.find(schema_id) != schemas.end())  // already built
+    if (schemas.find(schema_id) != schemas.end())
       return;
-    active_schema_ids.push_back(schema_id);
-    LOG(INFO) << "schema: " << schema_id;
-    path schema_path;
-    if (schemas.find(schema_id) == schemas.end()) {
-      schema_path = resolver->ResolvePath(schema_id);
-      schemas[schema_id] = schema_path;
-    } else {
-      schema_path = schemas[schema_id];
-    }
+    const path schema_path = resolver->ResolvePath(schema_id);
+    schemas[schema_id] = schema_path;
     if (schema_path.empty() || !fs::exists(schema_path)) {
       if (as_dependency) {
         LOG(WARNING) << "missing input schema; skipped unsatisfied dependency: "
@@ -221,13 +234,75 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
       }
       return;
     }
-    the<DeploymentTask> t(new SchemaUpdate(schema_path));
-    if (t->Run(deployer))
-      ++success;
-    else
+    ConfigFileUpdate update(schema_id + ".schema.yaml", "schema/version");
+    if (!update.Run(deployer)) {
       ++failure;
+      return;
+    }
+    the<Config> schema_config(schema_component->Create(schema_id));
+    vector<DictCompiler::DictionarySpec> definitions;
+    if (!schema_config ||
+        !DictCompiler::ReadDictionarySpecs(schema_config.get(), &definitions)) {
+      ++failure;
+      return;
+    }
+    const path compiled_schema = compiled_resolver->ResolvePath(schema_id);
+    auto add_unit = [&](CompileUnit unit) {
+      const string id = unit.id();
+      if (!graph.AddUnit(std::move(unit)))
+        return false;
+      schema_units[schema_id].push_back(id);
+      unit_owners[id] = schema_id;
+      return true;
+    };
+    for (const auto& definition : definitions) {
+      uint64_t estimated = DictCompiler::EstimateMemory(definition.name);
+      for (const auto& pack : definition.packs) {
+        estimated = (std::max)(estimated, DictCompiler::EstimateMemory(pack));
+      }
+      CompileUnit unit(schema_id + ":dictionary:" + definition.name, estimated,
+                       [definition, compiled_schema]() {
+                         return DictCompiler::CompileDictionary(
+                             definition, compiled_schema);
+                       });
+      auto output = [&](const string& name) {
+        unit.AddOutput(path(name).filename().to_utf8_string());
+      };
+      output(definition.name + ".table.bin");
+      output(definition.name + ".reverse.bin");
+      for (const auto& pack : definition.packs)
+        output(pack + ".table.bin");
+      for (const auto& prism : definition.prisms)
+        output(prism.first + ".prism.bin");
+      if (!add_unit(std::move(unit))) {
+        ++failure;
+        return;
+      }
+    }
+    if (!schema_config->IsNull("build/auxiliary/dictionary") ||
+        !schema_config->IsNull("build/auxiliary/algebra")) {
+      string source;
+      schema_config->GetString("build/auxiliary/dictionary", &source);
+      CompileUnit unit(schema_id + ":auxiliary",
+                       DictCompiler::EstimateMemory(source, true),
+                       [compiled_schema]() {
+                         return DictCompiler::CompileAuxiliary(compiled_schema);
+                       });
+      if (auto groups = schema_config->GetMap("build/auxiliary/algebra")) {
+        for (const auto& group : *groups)
+          unit.AddOutput(
+              path(group.first + ".aux.bin").filename().to_utf8_string());
+      } else {
+        unit.AddOutput("auto.aux.bin");
+      }
+      if (!add_unit(std::move(unit))) {
+        ++failure;
+        return;
+      }
+    }
+    active_schema_ids.push_back(schema_id);
+    prepared_schemas.emplace_back(schema_id, std::move(schema_config));
   };
-  auto schema_component = Config::Require("schema");
   for (auto it = schema_list->begin(); it != schema_list->end(); ++it) {
     auto item = As<ConfigMap>(*it);
     if (!item)
@@ -248,8 +323,32 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
         const string& dependency_id = dependency->str();
         bool as_dependency = true;
         build_schema(dependency_id, as_dependency);
+        for (const auto& prerequisite : schema_units[schema_id]) {
+          for (const auto& dependent : schema_units[dependency_id])
+            graph.AddDependency(prerequisite, dependent);
+        }
       }
     }
+  }
+  CompileScheduler scheduler;
+  auto result = scheduler.Run(graph);
+  if (!result) {
+    if (rewrite_workspace_started)
+      RewriteCompiler::AbortWorkspace(deployer);
+    return false;
+  }
+  set<string> failed_schemas;
+  for (const auto& unit : result->failed_units)
+    failed_schemas.insert(unit_owners.at(unit));
+  for (const auto& schema : prepared_schemas) {
+    if (failed_schemas.count(schema.first))
+      ++failure;
+    else
+      ++success;
+    RewriteCompiler compiler(schema.first, schema.second.get(), deployer);
+    if (!compiler.Compile())
+      LOG(WARNING) << "rewrite data for schema '" << schema.first
+                   << "' was not updated.";
   }
   if (rewrite_workspace_started) {
     Rewriter::ReleaseStagesForDeployment();

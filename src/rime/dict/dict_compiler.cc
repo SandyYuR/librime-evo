@@ -5,6 +5,7 @@
 // 2011-11-27 GONG Chen <chen.sst@gmail.com>
 //
 #include <filesystem>
+#include <limits>
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -90,31 +91,56 @@ static uint32_t compute_dict_file_checksum(uint32_t initial_checksum,
   return cc.Checksum();
 }
 
-bool DictCompiler::CompileDictionaries(const path& schema_file, int options) {
-  Config schema;
-  if (!schema.LoadFromFile(schema_file))
+uint64_t DictCompiler::EstimateMemory(const string& dict_name, bool auxiliary) {
+  constexpr uint64_t kEstimatedBytesPerSourceByte = 32;
+  the<ResourceResolver> resolver(
+      Service::instance().CreateResourceResolver({"source_file", "", ""}));
+  const path source =
+      resolver->ResolvePath(dict_name + (auxiliary ? ".yaml" : ".dict.yaml"));
+  std::ifstream stream(source);
+  DictSettings settings;
+  set<path> sources{source};
+  if (!auxiliary && stream && settings.LoadDictHeader(stream)) {
+    if (auto tables = settings.GetTables()) {
+      for (const auto& item : *tables) {
+        if (auto value = As<ConfigValue>(item))
+          sources.insert(resolver->ResolvePath(value->str() + ".dict.yaml"));
+      }
+    }
+    if (settings.use_preset_vocabulary())
+      sources.insert(PresetVocabulary::DictFilePath(settings.vocabulary()));
+  }
+  uint64_t size = 0;
+  const auto maximum = std::numeric_limits<uint64_t>::max();
+  for (const auto& file : sources) {
+    std::error_code ec;
+    const uint64_t bytes = std::filesystem::file_size(file, ec);
+    if (!ec)
+      size = bytes > maximum - size ? maximum : size + bytes;
+  }
+  return size > maximum / kEstimatedBytesPerSourceByte
+             ? maximum
+             : size * kEstimatedBytesPerSourceByte;
+}
+
+bool DictCompiler::ReadDictionarySpecs(Config* schema,
+                                       vector<DictionarySpec>* definitions) {
+  if (!schema || !definitions || !PrismConfig::ValidateReferences(schema))
     return false;
-  if (!PrismConfig::ValidateReferences(&schema))
-    return false;
-  if (schema.IsNull("build/dictionaries"))
+  definitions->clear();
+  if (schema->IsNull("build/dictionaries"))
     return true;
-  auto dictionaries = schema.GetMap("build/dictionaries");
+  auto dictionaries = schema->GetMap("build/dictionaries");
   if (!dictionaries) {
     LOG(ERROR) << "build/dictionaries must be a map keyed by dictionary name";
     return false;
   }
 
-  struct Definition {
-    string name;
-    vector<string> packs;
-    vector<pair<string, an<ConfigList>>> prisms;
-  };
-  vector<Definition> definitions;
   hash_set<string> table_names;
   hash_set<string> prism_names;
   for (const auto& item : *dictionaries) {
     auto entry = As<ConfigMap>(item.second);
-    Definition definition;
+    DictionarySpec definition;
     definition.name = item.first;
     if (definition.name.empty() || !entry) {
       LOG(ERROR) << "build/dictionaries entries require a nonempty dictionary "
@@ -176,24 +202,42 @@ bool DictCompiler::CompileDictionaries(const path& schema_file, int options) {
         return false;
       }
     }
-    definitions.push_back(std::move(definition));
+    definitions->push_back(std::move(definition));
   }
 
+  return true;
+}
+
+bool DictCompiler::CompileDictionary(const DictionarySpec& definition,
+                                     const path& schema_file,
+                                     int options) {
+  if (definition.name.empty() || definition.prisms.empty())
+    return false;
   DictionaryComponent component;
   the<ResourceResolver> prism_resolver(
       Service::instance().CreateDeployedResourceResolver(
           {"prism", "", ".prism.bin"}));
+  the<Dictionary> dictionary(component.Create(
+      definition.name, definition.prisms.front().first, definition.packs));
+  DictCompiler compiler(dictionary.get());
+  compiler.set_options(options);
+  for (const auto& prism : definition.prisms) {
+    compiler.prism_specs_.push_back(
+        {New<Prism>(prism_resolver->ResolvePath(prism.first)), prism.second});
+  }
+  return compiler.Compile(schema_file);
+}
+
+bool DictCompiler::CompileDictionaries(const path& schema_file, int options) {
+  Config schema;
+  if (!schema.LoadFromFile(schema_file))
+    return false;
+  vector<DictionarySpec> definitions;
+  if (!ReadDictionarySpecs(&schema, &definitions))
+    return false;
   bool success = true;
   for (const auto& definition : definitions) {
-    the<Dictionary> dictionary(component.Create(
-        definition.name, definition.prisms.front().first, definition.packs));
-    DictCompiler compiler(dictionary.get());
-    compiler.set_options(options);
-    for (const auto& prism : definition.prisms) {
-      compiler.prism_specs_.push_back(
-          {New<Prism>(prism_resolver->ResolvePath(prism.first)), prism.second});
-    }
-    if (!compiler.Compile(schema_file))
+    if (!CompileDictionary(definition, schema_file, options))
       success = false;
   }
   return success;

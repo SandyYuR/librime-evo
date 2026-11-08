@@ -14,6 +14,7 @@
 namespace rime {
 
 class Dictionary;
+class Config;
 class ConfigList;
 class Prism;
 class Table;
@@ -38,6 +39,19 @@ class DictCompiler {
   RIME_DLL bool Compile(const path& schema_file);
   RIME_DLL static bool CompileDictionaries(const path& schema_file,
                                            int options = 0);
+  // Imported tables and the preset vocabulary contribute to peak memory.
+  RIME_DLL static uint64_t EstimateMemory(const string& dictionary,
+                                          bool auxiliary = false);
+  struct DictionarySpec {
+    string name;
+    vector<string> packs;
+    vector<pair<string, an<ConfigList>>> prisms;
+  };
+  RIME_DLL static bool ReadDictionarySpecs(Config* schema,
+                                           vector<DictionarySpec>* definitions);
+  RIME_DLL static bool CompileDictionary(const DictionarySpec& definition,
+                                         const path& schema_file,
+                                         int options = 0);
   RIME_DLL static bool CompileAuxiliary(const path& schema_file);
   void set_options(int options) { options_ = options; }
 

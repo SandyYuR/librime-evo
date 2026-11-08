@@ -7,6 +7,10 @@
 #ifndef RIME_USER_DICTIONARY_H_
 #define RIME_USER_DICTIONARY_H_
 
+#ifndef RIME_USER_DICT_CACHE_ENABLED
+#define RIME_USER_DICT_CACHE_ENABLED 1
+#endif
+
 #include <time.h>
 #include <atomic>
 #include <memory>
@@ -17,7 +21,7 @@
 
 namespace rime {
 
-class UserDictEntryIterator : public DictEntryFilterBinder {
+class RIME_DLL UserDictEntryIterator : public DictEntryFilterBinder {
  public:
   UserDictEntryIterator() = default;
 
@@ -63,6 +67,8 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
 
   void Attach(const an<Table>& table, const an<Prism>& prism);
   bool Load();
+  // Revalidate metadata and rebuild the shared query snapshot.
+  RIME_DLL bool Reload();
   bool loaded() const;
   bool readonly() const;
   void SetWriteOwner(bool owner) {

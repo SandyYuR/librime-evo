@@ -78,7 +78,7 @@ class Dictionary : public Class<Dictionary, const Ticket&> {
                       vector<string> packs,
                       vector<of<Table>> tables,
                       an<Prism> prism);
-  virtual ~Dictionary();
+  RIME_DLL virtual ~Dictionary();
 
   bool Exists() const;
   RIME_DLL bool Remove();

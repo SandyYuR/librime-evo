@@ -58,6 +58,9 @@ class LevelDb : public Db, public Recoverable, public Transactional {
   bool Update(const string& key, const string& value) override;
   bool Erase(const string& key) override;
 
+  RIME_DLL bool EnableQueryCache();
+  RIME_DLL bool RebuildQueryCache();
+
   // Recoverable
   bool Recover() override;
 
@@ -71,6 +74,7 @@ class LevelDb : public Db, public Recoverable, public Transactional {
 
   the<LevelDbWrapper> db_;
   string db_type_;
+  bool query_cache_enabled_ = false;
 };
 
 }  // namespace rime

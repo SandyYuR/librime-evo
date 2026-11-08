@@ -12,6 +12,7 @@
 #include <rime/dict/dict_compiler.h>
 #include <rime/dict/dictionary.h>
 #include <rime/dict/text_db.h>
+#include <rime/dict/level_db.h>
 #include <rime/dict/user_dictionary.h>
 #include <rime/gear/auxiliary_matcher.h>
 
@@ -98,6 +99,7 @@ sort: by_weight
 
   void TearDown() override {
     database_.reset();
+    std::filesystem::remove_all("aux_path_cache.userdb");
     for (const char* file :
          {"aux_path_test.dict.yaml", "aux_path_test_aux.yaml",
           "aux_path_test.schema.yaml", "aux_path_test.table.bin",
@@ -360,37 +362,48 @@ TEST_F(RimeAuxiliaryLookupTest, WithoutAuxiliaryKeepsNativeResults) {
 
 TEST_F(RimeAuxiliaryLookupTest, UserDictionaryFiltersTheChosenAuxiliaryPath) {
   auto dict = OpenDictionary("zrm");
-  auto db =
-      New<UserDbWrapper<TextDb>>(path{"aux_path_user.txt"}, "aux_path_user");
-  ASSERT_TRUE(db->Open());
-  ASSERT_TRUE(db->Update("ni lin \t逆鳞", "1,1,1,0,0"));
-  ASSERT_TRUE(db->Update("ni lin \t你𤆄", "1,1,1,0,0"));
-  ASSERT_TRUE(db->Update("ni \t你", "1,1,1,0,0"));
-  UserDictionary user("aux_path_user", db);
-  user.Attach(dict->primary_table(), dict->prism());
-  user.SetUserDictMode("auto");
-  AuxiliaryMatcher matcher(dict.get(), database_.get());
-  Syllabifier syllabifier;
-  syllabifier.SetAuxiliaryLookup(
-      [&matcher](const string& code, vector<AuxGraphMatch>* matches) {
-        matcher.Lookup(code, matches);
-      });
-  SyllableGraph graph;
-  ASSERT_EQ(5, syllabifier.BuildSyllableGraph("nizln", *dict->prism(), &graph));
-  auto result = user.Lookup(graph, 0);
-  ASSERT_TRUE(result);
-  auto full = result->find(5);
-  ASSERT_NE(result->end(), full);
-  ASSERT_FALSE(full->second.exhausted());
-  EXPECT_EQ("逆鳞", full->second.Peek()->text);
-  EXPECT_FALSE(full->second.Next());
-  SyllableGraph ordinary_graph;
-  ASSERT_EQ(4, syllabifier.BuildSyllableGraph("nihk", *dict->prism(),
-                                              &ordinary_graph));
-  auto ordinary_result = user.Lookup(ordinary_graph, 0);
-  ASSERT_TRUE(ordinary_result);
-  auto prefix = ordinary_result->find(2);
-  ASSERT_NE(ordinary_result->end(), prefix);
-  ASSERT_FALSE(prefix->second.exhausted());
-  EXPECT_EQ("你", prefix->second.Peek()->text);
+  for (bool cached : {false, true}) {
+    SCOPED_TRACE(cached ? "cached LevelDB" : "TextDB");
+    an<Db> db;
+    if (cached)
+      db = New<UserDbWrapper<LevelDb>>(path{"aux_path_cache.userdb"},
+                                       "aux_path_user");
+    else
+      db = New<UserDbWrapper<TextDb>>(path{"aux_path_user.txt"},
+                                      "aux_path_user");
+    ASSERT_TRUE(db->Open());
+    ASSERT_TRUE(db->Update("ni lin \t逆鳞", "1,1,1,0,0"));
+    ASSERT_TRUE(db->Update("ni lin \t你𤆄", "1,1,1,0,0"));
+    ASSERT_TRUE(db->Update("ni \t你", "1,1,1,0,0"));
+    UserDictionary user("aux_path_user", db);
+    user.Attach(dict->primary_table(), dict->prism());
+    ASSERT_TRUE(user.Load());
+    user.SetUserDictMode("auto");
+    AuxiliaryMatcher matcher(dict.get(), database_.get());
+    Syllabifier syllabifier;
+    syllabifier.SetAuxiliaryLookup(
+        [&matcher](const string& code, vector<AuxGraphMatch>* matches) {
+          matcher.Lookup(code, matches);
+        });
+    SyllableGraph graph;
+    ASSERT_EQ(5,
+              syllabifier.BuildSyllableGraph("nizln", *dict->prism(), &graph));
+    auto result = user.Lookup(graph, 0);
+    ASSERT_TRUE(result);
+    auto full = result->find(5);
+    ASSERT_NE(result->end(), full);
+    ASSERT_FALSE(full->second.exhausted());
+    EXPECT_EQ("逆鳞", full->second.Peek()->text);
+    EXPECT_FALSE(full->second.Next());
+    SyllableGraph ordinary_graph;
+    ASSERT_EQ(4, syllabifier.BuildSyllableGraph("nihk", *dict->prism(),
+                                                &ordinary_graph));
+    auto ordinary_result = user.Lookup(ordinary_graph, 0);
+    ASSERT_TRUE(ordinary_result);
+    auto prefix = ordinary_result->find(2);
+    ASSERT_NE(ordinary_result->end(), prefix);
+    ASSERT_FALSE(prefix->second.exhausted());
+    EXPECT_EQ("你", prefix->second.Peek()->text);
+    ASSERT_TRUE(db->Close());
+  }
 }

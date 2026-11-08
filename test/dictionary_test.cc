@@ -131,3 +131,25 @@ TEST(RimeAuxiliaryCompilationTest, HeaderlessImportedSourceKeepsFirstRow) {
   ASSERT_TRUE(bool(std::getline(input, first)));
   EXPECT_EQ("甲\tcd", first);
 }
+
+TEST_F(RimeDictionaryTest, ScriptLookupWithExclude) {
+  ASSERT_TRUE(dict_->loaded());
+  rime::SyllableGraph g;
+  rime::Syllabifier s;
+  rime::string input("gei");
+  rime::hash_set<rime::string> blacklist{"\xe7\xbb\x99"};  // 给
+  ASSERT_TRUE(s.BuildSyllableGraph(input, *dict_->prism(), &g) > 0);
+  EXPECT_EQ(g.interpreted_length, g.input_length);
+  auto c = dict_->Lookup(g, 0, &blacklist);
+  EXPECT_TRUE(!c);
+}
+
+TEST_F(RimeDictionaryTest, TableLookupWithExclude) {
+  ASSERT_TRUE(dict_->loaded());
+  rime::string input("gei");
+  rime::hash_set<rime::string> blacklist{"\xe7\xbb\x99"};  // 给
+  rime::DictEntryIterator iter;
+  size_t keys = dict_->LookupWords(&iter, input, true, 100, &blacklist);
+  EXPECT_EQ(keys, 1);
+  EXPECT_TRUE(iter.exhausted());
+}
