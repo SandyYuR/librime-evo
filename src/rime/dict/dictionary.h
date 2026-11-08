@@ -129,6 +129,11 @@ class DictionaryComponent : public Dictionary::Component {
   Dictionary* Create(string dict_name, string prism_name, vector<string> packs);
 
  private:
+  string ResolvePrismName(Config* config,
+                          const string& dict_name,
+                          const string& prism_name);
+  an<Prism> GetPrism(const string& resource_name);
+
   map<string, weak<Prism>> prism_map_;
   map<string, weak<Table>> table_map_;
   the<ResourceResolver> prism_resource_resolver_;

@@ -15,6 +15,7 @@
 #include <rime/algo/algebra.h>
 #include <rime/algo/syllabifier.h>
 #include <rime/dict/vocabulary.h>
+#include <rime/dict/prism_config.h>
 
 namespace rime {
 
@@ -136,11 +137,19 @@ class Patterns : public vector<boost::regex> {
 };
 
 struct Ticket;
+class Context;
+class Dictionary;
+class Prism;
+class UserDictionary;
 
 class TranslatorOptions {
  public:
   TranslatorOptions(const Ticket& ticket);
   bool IsUserDictDisabledFor(const string& input) const;
+  bool SelectPrism(Dictionary* dictionary,
+                   const Context* context,
+                   UserDictionary* user_dictionary = nullptr,
+                   bool* changed = nullptr);
 
   const string& delimiters() const { return delimiters_; }
   vector<string> tags() const { return tags_; }
@@ -179,6 +188,9 @@ class TranslatorOptions {
   Projection comment_formatter_;
   Patterns user_dict_disabling_patterns_;
   hash_set<string> blacklist_;
+  PrismConfig prism_config_;
+  bool prism_config_valid_ = true;
+  an<Prism> active_prism_;
 };
 
 }  // namespace rime

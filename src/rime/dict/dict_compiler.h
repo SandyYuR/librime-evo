@@ -14,11 +14,11 @@
 namespace rime {
 
 class Dictionary;
+class ConfigList;
 class Prism;
 class Table;
 class ReverseDb;
 class DictSettings;
-class EditDistanceCorrector;
 class EntryCollector;
 class Vocabulary;
 class ResourceResolver;
@@ -36,20 +36,23 @@ class DictCompiler {
   RIME_DLL virtual ~DictCompiler();
 
   RIME_DLL bool Compile(const path& schema_file);
+  RIME_DLL static bool CompileDictionaries(const path& schema_file,
+                                           int options = 0);
   RIME_DLL static bool CompileAuxiliary(const path& schema_file);
   void set_options(int options) { options_ = options; }
-  void set_translator_namespace(string name_space) {
-    translator_namespace_ = std::move(name_space);
-  }
-  void set_input_type(string type) { input_type_ = std::move(type); }
 
  private:
+  struct PrismSpec {
+    an<Prism> prism;
+    an<ConfigList> algebra;
+  };
+
   bool BuildTable(int table_index,
                   EntryCollector& collector,
                   DictSettings* settings,
                   const vector<path>& dict_files,
                   uint32_t dict_file_checksum);
-  bool BuildPrism(const path& schema_file,
+  bool BuildPrism(const an<ConfigList>& algebra,
                   uint32_t dict_file_checksum,
                   uint32_t schema_file_checksum);
   bool BuildReverseDb(DictSettings* settings,
@@ -60,11 +63,9 @@ class DictCompiler {
   const string& dict_name_;
   const vector<string>& packs_;
   an<Prism> prism_;
-  an<EditDistanceCorrector> correction_;
   vector<of<Table>> tables_;
   int options_ = 0;
-  string translator_namespace_ = "translator";
-  string input_type_;
+  vector<PrismSpec> prism_specs_;
   the<ResourceResolver> source_resolver_;
   the<ResourceResolver> target_resolver_;
 };

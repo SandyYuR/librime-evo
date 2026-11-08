@@ -146,7 +146,8 @@ an<Translation> ReverseLookupTranslator::Query(const string& input,
     return nullptr;
   if (!initialized_)
     Initialize();  // load reverse dict at first use
-  if (!dict_ || !dict_->loaded())
+  if (!dict_ || !options_ ||
+      !options_->SelectPrism(dict_.get(), engine_->context()))
     return nullptr;
   DLOG(INFO) << "input = '" << input << "', [" << segment.start << ", "
              << segment.end << ")";

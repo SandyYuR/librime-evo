@@ -16,13 +16,13 @@
 #include <rime/algo/algebra.h>
 #include <rime/algo/utilities.h>
 #include <rime/dict/auxiliary_db.h>
-#include <rime/dict/corrector.h>
 #include <rime/dict/dict_compiler.h>
 #include <rime/dict/dict_settings.h>
 #include <rime/dict/dictionary.h>
 #include <rime/dict/entry_collector.h>
 #include <rime/dict/preset_vocabulary.h>
 #include <rime/dict/prism.h>
+#include <rime/dict/prism_config.h>
 #include <rime/dict/reverse_lookup_dictionary.h>
 #include <rime/dict/table.h>
 #include <rime/resource.h>
@@ -36,49 +36,6 @@ static bool BuildAuxiliaryDatabase(const ReverseLookupTable& sources,
                                    an<ConfigList> algebra,
                                    const path& target,
                                    uint32_t checksum);
-
-static bool get_speller_algebra(Config& config,
-                                const string& path,
-                                an<ConfigList>* algebra,
-                                const string& group_name = {}) {
-  *algebra = config.GetList(path);
-  if (*algebra)
-    return true;
-
-  auto groups = config.GetMap(path);
-  if (!groups)
-    return true;
-
-  if (group_name.empty()) {
-    LOG(ERROR) << path << " contains named groups but no group was selected";
-    return false;
-  }
-  string selected_group = group_name;
-  if (selected_group == "auto") {
-    auto it = groups->begin();
-    if (it == groups->end()) {
-      LOG(ERROR) << path << " contains no named groups";
-      return false;
-    }
-    auto next = it;
-    ++next;
-    if (next != groups->end()) {
-      LOG(ERROR) << path
-                 << " has multiple named groups; selector 'auto' is "
-                    "ambiguous";
-      return false;
-    }
-    selected_group = it->first;
-  }
-  *algebra = As<ConfigList>(groups->Get(selected_group));
-  if (!*algebra) {
-    LOG(ERROR) << path << " group '" << selected_group
-               << "' is missing or "
-                  "not a list";
-    return false;
-  }
-  return true;
-}
 
 DictCompiler::DictCompiler(Dictionary* dictionary)
     : dict_name_(dictionary->name()),
@@ -133,6 +90,115 @@ static uint32_t compute_dict_file_checksum(uint32_t initial_checksum,
   return cc.Checksum();
 }
 
+bool DictCompiler::CompileDictionaries(const path& schema_file, int options) {
+  Config schema;
+  if (!schema.LoadFromFile(schema_file))
+    return false;
+  if (!PrismConfig::ValidateReferences(&schema))
+    return false;
+  if (schema.IsNull("build/dictionaries"))
+    return true;
+  auto dictionaries = schema.GetMap("build/dictionaries");
+  if (!dictionaries) {
+    LOG(ERROR) << "build/dictionaries must be a map keyed by dictionary name";
+    return false;
+  }
+
+  struct Definition {
+    string name;
+    vector<string> packs;
+    vector<pair<string, an<ConfigList>>> prisms;
+  };
+  vector<Definition> definitions;
+  hash_set<string> table_names;
+  hash_set<string> prism_names;
+  for (const auto& item : *dictionaries) {
+    auto entry = As<ConfigMap>(item.second);
+    Definition definition;
+    definition.name = item.first;
+    if (definition.name.empty() || !entry) {
+      LOG(ERROR) << "build/dictionaries entries require a nonempty dictionary "
+                    "name and a map of build settings";
+      return false;
+    }
+    if (!table_names.insert(definition.name).second) {
+      LOG(ERROR) << "duplicate table build: " << definition.name;
+      return false;
+    }
+    if (auto packs_item = entry->Get("packs")) {
+      auto packs = As<ConfigList>(packs_item);
+      if (!packs) {
+        LOG(ERROR) << "build dictionary '" << definition.name
+                   << "' packs must be a list";
+        return false;
+      }
+      for (const auto& pack_item : *packs) {
+        auto pack = As<ConfigValue>(pack_item);
+        if (!pack || pack->str().empty()) {
+          LOG(ERROR) << "invalid pack in build dictionary '" << definition.name
+                     << "'";
+          return false;
+        }
+        if (!table_names.insert(pack->str()).second) {
+          LOG(ERROR) << "duplicate table build: " << pack->str();
+          return false;
+        }
+        definition.packs.push_back(pack->str());
+      }
+    }
+    auto algebra = entry->Get("algebra");
+    if (!algebra || As<ConfigList>(algebra)) {
+      definition.prisms.emplace_back(definition.name, As<ConfigList>(algebra));
+    } else if (auto groups = As<ConfigMap>(algebra)) {
+      if (groups->empty()) {
+        LOG(ERROR) << "build dictionary '" << definition.name
+                   << "' algebra contains no groups";
+        return false;
+      }
+      for (const auto& group : *groups) {
+        auto rules = As<ConfigList>(group.second);
+        if (group.first.empty() || !rules) {
+          LOG(ERROR) << "invalid algebra group in build dictionary '"
+                     << definition.name << "'";
+          return false;
+        }
+        definition.prisms.emplace_back(definition.name + "." + group.first,
+                                       rules);
+      }
+    } else {
+      LOG(ERROR) << "build dictionary '" << definition.name
+                 << "' algebra must be a list or a map of lists";
+      return false;
+    }
+    for (const auto& prism : definition.prisms) {
+      if (!prism_names.insert(prism.first).second) {
+        LOG(ERROR) << "duplicate prism build: " << prism.first;
+        return false;
+      }
+    }
+    definitions.push_back(std::move(definition));
+  }
+
+  DictionaryComponent component;
+  the<ResourceResolver> prism_resolver(
+      Service::instance().CreateDeployedResourceResolver(
+          {"prism", "", ".prism.bin"}));
+  bool success = true;
+  for (const auto& definition : definitions) {
+    the<Dictionary> dictionary(component.Create(
+        definition.name, definition.prisms.front().first, definition.packs));
+    DictCompiler compiler(dictionary.get());
+    compiler.set_options(options);
+    for (const auto& prism : definition.prisms) {
+      compiler.prism_specs_.push_back(
+          {New<Prism>(prism_resolver->ResolvePath(prism.first)), prism.second});
+    }
+    if (!compiler.Compile(schema_file))
+      success = false;
+  }
+  return success;
+}
+
 bool DictCompiler::Compile(const path& schema_file) {
   LOG(INFO) << "compiling dictionary for " << schema_file;
   bool build_table_from_source = true;
@@ -150,12 +216,9 @@ bool DictCompiler::Compile(const path& schema_file) {
                                     source_resolver_.get())) {
     return false;
   }
-  uint32_t schema_file_checksum =
-      schema_file.empty() ? 0 : Checksum(schema_file);
   uint32_t dict_file_checksum =
       compute_dict_file_checksum(0, dict_files, settings);
   bool rebuild_table = false;
-  bool rebuild_prism = false;
   const auto& primary_table = tables_[0];
   if (primary_table->Exists() && primary_table->Load()) {
     if (build_table_from_source) {
@@ -172,16 +235,6 @@ bool DictCompiler::Compile(const path& schema_file) {
                << ".table.bin exists.";
     return false;
   }
-  if (prism_->Exists() && prism_->Load()) {
-    rebuild_prism = prism_->dict_file_checksum() != dict_file_checksum ||
-                    prism_->schema_file_checksum() != schema_file_checksum;
-    prism_->Close();
-  } else {
-    rebuild_prism = true;
-  }
-  LOG(INFO) << dict_file << "[" << dict_files.size() << " file(s)]"
-            << " (" << dict_file_checksum << ")";
-  LOG(INFO) << schema_file << " (" << schema_file_checksum << ")";
   {
     the<ResourceResolver> resolver(
         Service::instance().CreateDeployedResourceResolver(
@@ -195,11 +248,13 @@ bool DictCompiler::Compile(const path& schema_file) {
   if (build_table_from_source && (options_ & kRebuildTable)) {
     rebuild_table = true;
   }
-  if (options_ & kRebuildPrism) {
-    rebuild_prism = true;
-  }
   Syllabary syllabary;
   if (rebuild_table) {
+    if (!build_table_from_source) {
+      LOG(ERROR) << "cannot rebuild dictionary '" << dict_name_
+                 << "' without its source";
+      return false;
+    }
     EntryCollector collector;
     if (!BuildTable(0, collector, &settings, dict_files, dict_file_checksum)) {
       return false;
@@ -211,14 +266,35 @@ bool DictCompiler::Compile(const path& schema_file) {
     else
       LOG(WARNING) << "couldn't load syllabary from '" << schema_file << "'";
   }
-  if (rebuild_prism &&
-      !BuildPrism(schema_file, dict_file_checksum, schema_file_checksum)) {
-    return false;
+  if (prism_specs_.empty())
+    prism_specs_.push_back({prism_, nullptr});
+  for (const auto& spec : prism_specs_) {
+    prism_ = spec.prism;
+    boost::crc_32_type checksum;
+    if (spec.algebra) {
+      for (const auto& item : *spec.algebra) {
+        auto rule = As<ConfigValue>(item);
+        if (!rule) {
+          LOG(ERROR) << "algebra rules must be strings";
+          return false;
+        }
+        checksum.process_bytes(rule->str().c_str(), rule->str().size() + 1);
+      }
+    }
+    const uint32_t algebra_checksum = checksum.checksum();
+    bool rebuild_prism = true;
+    if (prism_->Exists() && prism_->Load()) {
+      rebuild_prism = prism_->dict_file_checksum() != dict_file_checksum ||
+                      prism_->schema_file_checksum() != algebra_checksum;
+      prism_->Close();
+    }
+    if ((rebuild_prism || (options_ & kRebuildPrism)) &&
+        !BuildPrism(spec.algebra, dict_file_checksum, algebra_checksum))
+      return false;
   }
   for (int table_index = 1; table_index < tables_.size(); ++table_index) {
     const auto& pack_name = packs_[table_index - 1];
     auto pack_table = tables_[table_index];
-    EntryCollector collector(std::move(syllabary));
     DictSettings settings;
     auto dict_file = source_resolver_->ResolvePath(pack_name + ".dict.yaml");
     if (!std::filesystem::exists(dict_file)) {
@@ -246,6 +322,8 @@ bool DictCompiler::Compile(const path& schema_file) {
     if (pack_table->Exists() && pack_table->Load()) {
       rebuild_pack = pack_table->dict_file_checksum() != pack_file_checksum;
     }
+    pack_table->Close();
+    EntryCollector collector(std::move(syllabary));
     if (rebuild_pack) {
       LOG(INFO) << "rebuilding pack '" << pack_name << "'";
       if (!BuildTable(table_index, collector, &settings, dict_files,
@@ -257,7 +335,6 @@ bool DictCompiler::Compile(const path& schema_file) {
                 << pack_table->file_path() << "'";
     }
     syllabary = std::move(collector.syllabary);
-    pack_table->Close();
   }
   // done!
   return true;
@@ -445,27 +522,37 @@ bool DictCompiler::CompileAuxiliary(const path& schema_file) {
   if (!schema.LoadFromFile(schema_file))
     return false;
 
+  if (!schema.IsNull("build/auxiliary") && !schema.GetMap("build/auxiliary")) {
+    LOG(ERROR) << "build/auxiliary must be a map";
+    return false;
+  }
   vector<pair<string, an<ConfigList>>> groups;
-  if (auto rules = schema.GetList("speller/aux_algebra")) {
+  if (auto rules = schema.GetList("build/auxiliary/algebra")) {
     groups.emplace_back("auto", rules);
-  } else if (auto named = schema.GetMap("speller/aux_algebra")) {
+  } else if (auto named = schema.GetMap("build/auxiliary/algebra")) {
     for (const auto& item : *named) {
       auto rules = As<ConfigList>(item.second);
       if (!rules) {
-        LOG(ERROR) << "speller/aux_algebra group '" << item.first
+        LOG(ERROR) << "build/auxiliary/algebra group '" << item.first
                    << "' is not a list";
         return false;
       }
       groups.emplace_back(item.first, rules);
     }
+  } else if (!schema.IsNull("build/auxiliary/algebra")) {
+    LOG(ERROR) << "build/auxiliary/algebra must be a list or a map of lists";
+    return false;
   }
   if (groups.empty())
     return true;
 
   string source_name;
-  if (!schema.GetString("speller/aux_dictionary", &source_name) ||
-      source_name.empty())
-    return true;
+  if (!schema.GetString("build/auxiliary/dictionary", &source_name) ||
+      source_name.empty()) {
+    LOG(ERROR)
+        << "build/auxiliary/dictionary is required for auxiliary algebra";
+    return false;
+  }
   if (!boost::iends_with(source_name, ".yaml"))
     source_name += ".yaml";
   the<ResourceResolver> source_resolver(
@@ -487,7 +574,7 @@ bool DictCompiler::CompileAuxiliary(const path& schema_file) {
     for (const auto& item : *group.second) {
       auto rule = As<ConfigValue>(item);
       if (!rule) {
-        LOG(ERROR) << "speller/aux_algebra group '" << group.first
+        LOG(ERROR) << "build/auxiliary/algebra group '" << group.first
                    << "' contains a non-string rule";
         return false;
       }
@@ -514,7 +601,7 @@ bool DictCompiler::CompileAuxiliary(const path& schema_file) {
   return true;
 }
 
-bool DictCompiler::BuildPrism(const path& schema_file,
+bool DictCompiler::BuildPrism(const an<ConfigList>& algebra,
                               uint32_t dict_file_checksum,
                               uint32_t schema_file_checksum) {
   LOG(INFO) << "building prism...";
@@ -528,67 +615,27 @@ bool DictCompiler::BuildPrism(const path& schema_file,
   if (!primary_table->Load() || !primary_table->GetSyllabary(&syllabary) ||
       syllabary.empty())
     return false;
-  // apply spelling algebra and prepare corrections (if enabled)
   Script script;
-  if (!schema_file.empty()) {
-    Config config;
-    if (!config.LoadFromFile(schema_file)) {
-      LOG(ERROR) << "error loading prism definition from " << schema_file;
-      return false;
-    }
-    Projection p;
-    an<ConfigList> algebra;
-    string algebra_path = translator_namespace_ + "/algebra";
-    if (config.IsNull(algebra_path))
-      algebra_path = "speller/algebra";
-    if (!get_speller_algebra(config, algebra_path, &algebra, input_type_))
-      return false;
-    if (algebra) {
-      for (size_t i = 0; i < algebra->size(); ++i) {
-        auto formula = algebra->GetValueAt(i);
-        if (!formula)
-          continue;
-        const string& text = formula->str();
-        if (text.size() > 3 && text.compare(0, 3, "aux") == 0 &&
-            !std::isalpha(static_cast<unsigned char>(text[3]))) {
-          LOG(ERROR) << "ordinary speller/algebra cannot contain AUX rule: "
-                     << text;
-          return false;
-        }
-      }
-    }
-    const bool ordinary_loaded = !algebra || p.Load(algebra);
-    if (!ordinary_loaded) {
-      LOG(ERROR) << "failed to load spelling algebra";
-      return false;
-    }
-    for (const auto& x : syllabary) {
-      script.AddSyllable(x);
-    }
-    if (ordinary_loaded)
-      p.Apply(&script);
-
-#if 0
-    // build corrector
-    bool enable_correction = false; // Avoid if initializer to comfort compilers
-    if (config.GetBool("translator/enable_correction", &enable_correction) &&
-        enable_correction) {
-      path corrector_path(prism_->file_path());
-      corrector_path.replace_extension("");
-      corrector_path.replace_extension(".correction.bin");
-      auto target_path = relocate_target(corrector_path,
-                                         target_resolver_.get());
-      correction_ = New<EditDistanceCorrector>(target_path);
-      if (correction_->Exists()) {
-        correction_->Remove();
-      }
-      if (!correction_->Build(syllabary, &script,
-                         dict_file_checksum, schema_file_checksum) ||
-          !correction_->Save()) {
+  if (algebra) {
+    for (const auto& item : *algebra) {
+      auto formula = As<ConfigValue>(item);
+      if (!formula)
+        return false;
+      const string& text = formula->str();
+      if (text.size() > 3 && text.compare(0, 3, "aux") == 0 &&
+          !std::isalpha(static_cast<unsigned char>(text[3]))) {
+        LOG(ERROR) << "dictionary algebra cannot contain AUX rule: " << text;
         return false;
       }
     }
-#endif
+    Projection projection;
+    if (!projection.Load(algebra)) {
+      LOG(ERROR) << "failed to load spelling algebra";
+      return false;
+    }
+    for (const auto& syllable : syllabary)
+      script.AddSyllable(syllable);
+    projection.Apply(&script);
   }
   if ((options_ & kDump) && !script.empty()) {
     path dump_path(prism_->file_path());

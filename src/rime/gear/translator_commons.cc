@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <boost/range/adaptor/reversed.hpp>
 #include <rime/config.h>
+#include <rime/context.h>
+#include <rime/dict/dictionary.h>
+#include <rime/dict/user_dictionary.h>
 #include <rime/schema.h>
 #include <rime/ticket.h>
 #include <rime/gear/grammar.h>
@@ -116,6 +119,8 @@ TranslatorOptions::TranslatorOptions(const Ticket& ticket) {
   if (!ticket.schema)
     return;
   if (Config* config = ticket.schema->config()) {
+    prism_config_valid_ = prism_config_.Load(config->GetMap(ticket.name_space),
+                                             ticket.name_space);
     config->GetString(ticket.name_space + "/delimiter", &delimiters_) ||
         config->GetString("speller/delimiter", &delimiters_);
     config->GetBool(ticket.name_space + "/contextual_suggestions",
@@ -165,6 +170,44 @@ TranslatorOptions::TranslatorOptions(const Ticket& ticket) {
   if (delimiters_.empty()) {
     delimiters_ = " ";
   }
+}
+
+bool TranslatorOptions::SelectPrism(Dictionary* dictionary,
+                                    const Context* context,
+                                    UserDictionary* user_dictionary,
+                                    bool* changed) {
+  if (changed)
+    *changed = false;
+  if (!prism_config_valid_)
+    return false;
+  if (!dictionary)
+    return prism_config_.selections.empty();
+  if (!prism_config_.selections.empty()) {
+    if (!context)
+      return false;
+    const auto* selected = &prism_config_.selections.front();
+    for (const auto& selection : prism_config_.selections) {
+      if (context->get_option(selection.option)) {
+        selected = &selection;
+        break;
+      }
+    }
+    if (!dictionary->SetPrism(selected->name)) {
+      LOG(ERROR) << "cannot select prism '" << selected->name
+                 << "' for dictionary '" << dictionary->name() << "'";
+      return false;
+    }
+  }
+  if (!dictionary->loaded() && !dictionary->Load())
+    return false;
+  if (active_prism_ != dictionary->prism()) {
+    if (user_dictionary)
+      user_dictionary->Attach(dictionary->primary_table(), dictionary->prism());
+    active_prism_ = dictionary->prism();
+    if (changed)
+      *changed = true;
+  }
+  return true;
 }
 
 bool TranslatorOptions::IsUserDictDisabledFor(const string& input) const {

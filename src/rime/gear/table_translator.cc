@@ -262,6 +262,9 @@ an<Translation> TableTranslator::Query(const string& input,
                                        const Segment& segment) {
   if (!segment.HasAnyTagIn(tags_))
     return nullptr;
+  if (!engine_ ||
+      !SelectPrism(dict_.get(), engine_->context(), user_dict_.get()))
+    return nullptr;
   DLOG(INFO) << "input = '" << input << "', [" << segment.start << ", "
              << segment.end << ")";
 
@@ -567,6 +570,9 @@ inline static void collect_entries(DictEntryList& entries,
 an<Translation> TableTranslator::MakeSentence(const string& input,
                                               size_t start,
                                               bool include_prefix_phrases) {
+  if (!engine_ ||
+      !SelectPrism(dict_.get(), engine_->context(), user_dict_.get()))
+    return nullptr;
   bool filter_by_charset = enable_charset_filter_ &&
                            !engine_->context()->get_option("extended_charset");
   DictEntryCollector collector;

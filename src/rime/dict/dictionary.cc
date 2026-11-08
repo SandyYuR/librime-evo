@@ -8,6 +8,7 @@
 #include <rime/algo/syllabifier.h>
 #include <rime/common.h>
 #include <rime/dict/dictionary.h>
+#include <rime/dict/prism_config.h>
 #include <rime/resource.h>
 #include <rime/schema.h>
 #include <rime/service.h>
@@ -687,9 +688,11 @@ Dictionary* DictionaryComponent::Create(const Ticket& ticket) {
   if (!ticket.schema)
     return nullptr;
   Config* config = ticket.schema->config();
+  PrismConfig prism_config;
+  if (!prism_config.Load(config->GetMap(ticket.name_space), ticket.name_space))
+    return nullptr;
   string dict_name;
-  if (!config->GetString(ticket.name_space + "/dictionary", &dict_name) &&
-      !config->GetString("speller/dictionary", &dict_name)) {
+  if (!config->GetString(ticket.name_space + "/dictionary", &dict_name)) {
     LOG(ERROR) << "dictionary not specified for " << ticket.name_space
                << " in schema '" << ticket.schema->schema_id() << "'.";
     return nullptr;
@@ -697,20 +700,19 @@ Dictionary* DictionaryComponent::Create(const Ticket& ticket) {
   if (dict_name.empty()) {
     return nullptr;  // not requiring static dictionary
   }
-  string prism_name;
-  auto prism_list = config->GetList(ticket.name_space + "/prisms");
-  if (!config->GetString(ticket.name_space + "/prism", &prism_name) &&
-      prism_list) {
-    for (const auto& item : *prism_list) {
-      auto map = As<ConfigMap>(item);
-      if (map && map->GetValue("name") &&
-          map->GetValue("name")->GetString(&prism_name)) {
-        break;
+  string prism_name = prism_config.name;
+  if (!prism_config.selections.empty())
+    prism_name = prism_config.selections.front().name;
+  const bool default_prism = prism_name.empty();
+  if (default_prism) {
+    prism_name = dict_name;
+    if (auto definitions = config->GetMap("build/dictionaries")) {
+      if (auto definition = As<ConfigMap>(definitions->Get(dict_name))) {
+        auto groups = As<ConfigMap>(definition->Get("algebra"));
+        if (groups && !groups->empty())
+          prism_name = dict_name + "." + groups->begin()->first;
       }
     }
-  }
-  if (prism_name.empty()) {
-    prism_name = dict_name;
   }
   vector<string> packs;
   if (auto pack_list = config->GetList(ticket.name_space + "/packs")) {
@@ -721,26 +723,49 @@ Dictionary* DictionaryComponent::Create(const Ticket& ticket) {
     }
   }
   const string primary_prism_name = prism_name;
+  if (!default_prism)
+    prism_name = ResolvePrismName(config, dict_name, prism_name);
   auto dictionary =
       Create(std::move(dict_name), std::move(prism_name), std::move(packs));
-  if (!dictionary || !prism_list)
-    return dictionary;
-  for (const auto& item : *prism_list) {
-    auto map = As<ConfigMap>(item);
-    string name;
-    if (!map || !map->GetValue("name") ||
-        !map->GetValue("name")->GetString(&name) || name.empty() ||
-        name == primary_prism_name) {
+  if (!dictionary)
+    return nullptr;
+  dictionary->AddPrism(primary_prism_name, dictionary->prism());
+  for (const auto& selection : prism_config.selections) {
+    if (selection.name == primary_prism_name) {
       continue;
     }
-    auto prism = prism_map_[name].lock();
-    if (!prism) {
-      auto file_path = prism_resource_resolver_->ResolvePath(name);
-      prism_map_[name] = prism = New<Prism>(file_path);
-    }
-    dictionary->AddPrism(name, prism);
+    dictionary->AddPrism(
+        selection.name,
+        GetPrism(ResolvePrismName(config, dictionary->name(), selection.name)));
   }
   return dictionary;
+}
+
+string DictionaryComponent::ResolvePrismName(Config* config,
+                                             const string& dict_name,
+                                             const string& prism_name) {
+  const string qualified_name = dict_name + "." + prism_name;
+  if (auto definitions = config->GetMap("build/dictionaries")) {
+    if (auto definition = As<ConfigMap>(definitions->Get(dict_name))) {
+      auto groups = As<ConfigMap>(definition->Get("algebra"));
+      if (groups && groups->HasKey(prism_name))
+        return qualified_name;
+    }
+  }
+  if (std::filesystem::exists(
+          prism_resource_resolver_->ResolvePath(qualified_name))) {
+    return qualified_name;
+  }
+  return prism_name;
+}
+
+an<Prism> DictionaryComponent::GetPrism(const string& resource_name) {
+  auto prism = prism_map_[resource_name].lock();
+  if (!prism) {
+    auto file_path = prism_resource_resolver_->ResolvePath(resource_name);
+    prism_map_[resource_name] = prism = New<Prism>(file_path);
+  }
+  return prism;
 }
 
 Dictionary* DictionaryComponent::Create(string dict_name,
@@ -752,11 +777,7 @@ Dictionary* DictionaryComponent::Create(string dict_name,
     auto file_path = table_resource_resolver_->ResolvePath(dict_name);
     table_map_[dict_name] = primary_table = New<Table>(file_path);
   }
-  auto prism = prism_map_[prism_name].lock();
-  if (!prism) {
-    auto file_path = prism_resource_resolver_->ResolvePath(prism_name);
-    prism_map_[prism_name] = prism = New<Prism>(file_path);
-  }
+  auto prism = GetPrism(prism_name);
   vector<of<Table>> tables = {std::move(primary_table)};
   for (const auto& pack : packs) {
     auto table = table_map_[pack].lock();

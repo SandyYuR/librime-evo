@@ -231,25 +231,6 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       enable_word_completion_ = enable_completion_;
     }
     config->GetInt(name_space_ + "/max_homophones", &max_homophones_);
-    if (auto prisms = config->GetList(name_space_ + "/prisms")) {
-      for (const auto& item : *prisms) {
-        auto map = As<ConfigMap>(item);
-        if (!map)
-          continue;
-        string name;
-        string option;
-        auto name_value = map->GetValue("name");
-        auto option_value = map->GetValue("option");
-        if (!name_value || !option_value || !name_value->GetString(&name) ||
-            !option_value->GetString(&option) || name.empty() ||
-            option.empty()) {
-          LOG(ERROR) << name_space_ << "/prisms entries require name and "
-                     << "option";
-          continue;
-        }
-        prism_selections_.push_back({std::move(name), std::move(option)});
-      }
-    }
     poet_.reset(new Poet(language(), config));
     if (an<ConfigList> rules = config->GetList(name_space_ + "/canonicalize")) {
       the<Projection> canonicalizer(new Projection());
@@ -332,33 +313,15 @@ an<Translation> ScriptTranslator::Query(const string& input,
 }
 
 bool ScriptTranslator::SelectPrism() {
-  if (prism_selections_.empty())
-    return true;
   if (!engine_ || !dict_)
     return false;
-  const auto* context = engine_->context();
-  string selected;
-  for (const auto& prism : prism_selections_) {
-    if (context->get_option(prism.option)) {
-      selected = prism.name;
-      break;
-    }
-  }
-  if (selected.empty())
-    selected = prism_selections_.front().name;
-  if (selected != active_prism_) {
-    if (!dict_->SetPrism(selected)) {
-      LOG(ERROR) << "translator '" << name_space_
-                 << "' cannot load configured prism '" << selected << "'";
-      return false;
-    }
-    active_prism_ = selected;
-    if (user_dict_)
-      user_dict_->Attach(dict_->primary_table(), dict_->prism());
-    auxiliary_matcher_.reset();
-  }
-  if (!dict_->loaded() && !dict_->Load())
+  bool changed = false;
+  if (!TranslatorOptions::SelectPrism(dict_.get(), engine_->context(),
+                                      user_dict_.get(), &changed)) {
     return false;
+  }
+  if (changed)
+    auxiliary_matcher_.reset();
   return true;
 }
 

@@ -64,35 +64,34 @@ sort: by_weight
 哀	wy
 里	zt
 )YAML";
-    std::ofstream("aux_path_test.schema.yaml") << R"YAML(speller:
-  aux_dictionary: aux_path_test_aux
-  algebra:
-    pinyin: []
-    zrm:
-      - xform/^hao$/hk/
-      - xform/^zai$/zl/
-      - xform/^lin$/ln/
-      - xform/^zeng$/zg/
-      - xform/^jia$/jw/
-  aux_algebra:
+    std::ofstream("aux_path_test.schema.yaml") << R"YAML(build:
+  dictionaries:
     aux_path_test:
-      - "aux|^([a-z])[a-z]*$|$1|"
-      - "aux|^([a-z]{2,})$|$1|abbrev"
-      - "aux|^([a-z]{2,})$|$1/|"
-      - "aux|^weak$|xy|abbrev"
-      - "aux|^norm$|xy|"
-    aux_path_other:
-      - "aux|^([a-z])[a-z]*$|$1|"
-      - "aux|^([a-z]{2,})$|$1/|"
+      algebra:
+        pinyin: []
+        zrm:
+          - xform/^hao$/hk/
+          - xform/^zai$/zl/
+          - xform/^lin$/ln/
+          - xform/^zeng$/zg/
+          - xform/^jia$/jw/
+  auxiliary:
+    dictionary: aux_path_test_aux
+    algebra:
+      aux_path_test:
+        - "aux|^([a-z])[a-z]*$|$1|"
+        - "aux|^([a-z]{2,})$|$1|abbrev"
+        - "aux|^([a-z]{2,})$|$1/|"
+        - "aux|^weak$|xy|abbrev"
+        - "aux|^norm$|xy|"
+      aux_path_other:
+        - "aux|^([a-z])[a-z]*$|$1|"
+        - "aux|^([a-z]{2,})$|$1/|"
 )YAML";
     ASSERT_TRUE(
         DictCompiler::CompileAuxiliary(path{"aux_path_test.schema.yaml"}));
-    for (const string type : {"pinyin", "zrm"}) {
-      auto dict = OpenDictionary(type, false);
-      DictCompiler compiler(dict.get());
-      compiler.set_input_type(type);
-      ASSERT_TRUE(compiler.Compile(path{"aux_path_test.schema.yaml"}));
-    }
+    ASSERT_TRUE(
+        DictCompiler::CompileDictionaries(path{"aux_path_test.schema.yaml"}));
     database_.reset(new AuxiliaryDb(path{"aux_path_test.aux.bin"}));
     ASSERT_TRUE(database_->Load());
   }
@@ -102,8 +101,8 @@ sort: by_weight
     for (const char* file :
          {"aux_path_test.dict.yaml", "aux_path_test_aux.yaml",
           "aux_path_test.schema.yaml", "aux_path_test.table.bin",
-          "aux_path_test.reverse.bin", "aux_path_test_pinyin.prism.bin",
-          "aux_path_test_zrm.prism.bin", "aux_path_test.aux.bin",
+          "aux_path_test.reverse.bin", "aux_path_test.pinyin.prism.bin",
+          "aux_path_test.zrm.prism.bin", "aux_path_test.aux.bin",
           "aux_path_other.aux.bin", "auto.aux.bin", "aux_path_user.txt"})
       std::remove(file);
   }
@@ -112,7 +111,7 @@ sort: by_weight
     auto dict = New<Dictionary>(
         "aux_path_test", vector<string>{},
         vector<of<Table>>{New<Table>(path{"aux_path_test.table.bin"})},
-        New<Prism>(path{"aux_path_test_" + type + ".prism.bin"}));
+        New<Prism>(path{"aux_path_test." + type + ".prism.bin"}));
     if (load)
       EXPECT_TRUE(dict->Load());
     return dict;
@@ -190,7 +189,7 @@ TEST_F(RimeAuxiliaryLookupTest, RebuildsOnlyTheChangedGroup) {
 
   Config schema;
   ASSERT_TRUE(schema.LoadFromFile(path{"aux_path_test.schema.yaml"}));
-  auto rules = schema.GetList("speller/aux_algebra/aux_path_other");
+  auto rules = schema.GetList("build/auxiliary/algebra/aux_path_other");
   ASSERT_TRUE(rules);
   ASSERT_TRUE(rules->Append(New<ConfigValue>("aux|^([a-z]{2,})$|$1|")));
   ASSERT_TRUE(schema.SaveToFile(path{"aux_path_test.schema.yaml"}));
@@ -211,9 +210,9 @@ TEST_F(RimeAuxiliaryLookupTest, RebuildsOnlyTheChangedGroup) {
 TEST_F(RimeAuxiliaryLookupTest, FlatRulesCompileAsAutoGroup) {
   Config schema;
   ASSERT_TRUE(schema.LoadFromFile(path{"aux_path_test.schema.yaml"}));
-  auto rules = schema.GetList("speller/aux_algebra/aux_path_other");
+  auto rules = schema.GetList("build/auxiliary/algebra/aux_path_other");
   ASSERT_TRUE(rules);
-  ASSERT_TRUE(schema.SetItem("speller/aux_algebra", rules));
+  ASSERT_TRUE(schema.SetItem("build/auxiliary/algebra", rules));
   ASSERT_TRUE(schema.SaveToFile(path{"aux_path_test.schema.yaml"}));
   ASSERT_TRUE(
       DictCompiler::CompileAuxiliary(path{"aux_path_test.schema.yaml"}));
@@ -227,7 +226,7 @@ TEST_F(RimeAuxiliaryLookupTest, FlatRulesCompileAsAutoGroup) {
 TEST_F(RimeAuxiliaryLookupTest, NoRulesDoNotReadAuxiliarySource) {
   Config schema;
   ASSERT_TRUE(
-      schema.SetString("speller/aux_dictionary", "nonexistent_aux_source"));
+      schema.SetString("build/auxiliary/dictionary", "nonexistent_aux_source"));
   ASSERT_TRUE(schema.SaveToFile(path{"aux_path_test.schema.yaml"}));
   EXPECT_TRUE(
       DictCompiler::CompileAuxiliary(path{"aux_path_test.schema.yaml"}));

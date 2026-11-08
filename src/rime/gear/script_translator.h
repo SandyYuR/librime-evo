@@ -79,12 +79,6 @@ class ScriptTranslator : public Translator,
   string auxiliary_type_;
   bool auxiliary_mode_ = false;
   string auxiliary_option_;
-  struct PrismSelection {
-    string name;
-    string option;
-  };
-  vector<PrismSelection> prism_selections_;
-  string active_prism_;
   the<Poet> poet_;
   vector<an<Phrase>> queue_;
 };
