@@ -22,6 +22,7 @@
 #include <rime/dict/db.h>
 #include <rime/dict/level_db.h>
 #include <rime/dict/table.h>
+#include <rime/dict/prism.h>
 #include <rime/dict/user_dictionary.h>
 #include <rime/dict/user_manual_order.h>
 #include <rime/dict/vocabulary.h>
@@ -199,6 +200,10 @@ UserDictionary::~UserDictionary() {
 }
 
 void UserDictionary::Attach(const an<Table>& table, const an<Prism>& prism) {
+  if (table_ != table || prism_ != prism) {
+    syllabary_.clear();
+    rev_syllabary_.clear();
+  }
   table_ = table;
   prism_ = prism;
 }
@@ -366,7 +371,9 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
             DLOG(INFO) << "prefix match found for '" << prefix << "'.";
             if (syllabary_.empty()) {
               Syllabary syllabary;
-              if (!table_->GetSyllabary(&syllabary)) {
+              if (!(prism_ && prism_->has_syllabary()
+                        ? prism_->GetSyllabary(&syllabary)
+                        : table_->GetSyllabary(&syllabary))) {
                 LOG(ERROR) << "failed to get syllabary for user dict: "
                            << name();
                 break;
@@ -761,7 +768,9 @@ bool UserDictionary::TranslateCodeToString(const Code& code, string* result) {
     string spelling = rev_syllabary_.count(syllable_id)
                           ? rev_syllabary_[syllable_id]
                           : (rev_syllabary_[syllable_id] =
-                                 table_->GetSyllableById(syllable_id));
+                                 (prism_ && prism_->has_syllabary()
+                                      ? prism_->GetSyllableById(syllable_id)
+                                      : table_->GetSyllableById(syllable_id)));
     if (spelling.empty()) {
       LOG(ERROR) << "Error translating syllable_id '" << syllable_id << "'.";
       result->clear();

@@ -29,7 +29,7 @@ const int32_t kSpellingTypeMask = ~kTypeIsCorrectionMask;
 
 }  // namespace
 
-const char kPrismFormat[] = "Rime::Prism/5.0";
+const char kPrismFormat[] = "Rime::Prism/6.0";
 const double kPrismFormatVersion = 5.0;
 
 const char kPrismFormatPrefix[] = "Rime::Prism/";
@@ -144,7 +144,8 @@ bool Prism::Save() {
 bool Prism::Build(const Syllabary& syllabary,
                   const Script* script,
                   uint32_t dict_file_checksum,
-                  uint32_t schema_file_checksum) {
+                  uint32_t schema_file_checksum,
+                  bool has_packs) {
   // building double-array trie
   size_t num_syllables = syllabary.size();
   size_t num_spellings = script ? script->size() : syllabary.size();
@@ -176,7 +177,10 @@ bool Prism::Build(const Syllabary& syllabary,
       num_spellings * 12 +
       map_size * (4 + sizeof(prism::SpellingDescriptor) + kDescriptorExtraSize);
   const size_t kReservedSize = 1024;
-  if (!Create(image_size + estimated_map_size + kReservedSize)) {
+  size_t code_bytes = syllabary.size() * sizeof(String);
+  for (const auto& code : syllabary)
+    code_bytes += code.size() + 1;
+  if (!Create(image_size + estimated_map_size + code_bytes + kReservedSize)) {
     LOG(ERROR) << "Error creating prism file '" << file_path() << "'.";
     return false;
   }
@@ -192,6 +196,17 @@ bool Prism::Build(const Syllabary& syllabary,
   metadata->num_spellings = num_spellings;
   metadata->max_key_length = max_key_length;
   metadata_ = metadata;
+  metadata->has_packs = has_packs;
+  auto codes = Allocate<String>(syllabary.size());
+  if (!codes)
+    return false;
+  metadata->syllabary.at = codes;
+  metadata->syllabary.size = syllabary.size();
+  size_t code_index = 0;
+  for (const auto& code : syllabary) {
+    if (!CopyString(code, &codes[code_index++]))
+      return false;
+  }
   // alphabet
   {
     set<char> alphabet;
@@ -259,7 +274,23 @@ bool Prism::Build(const Syllabary& syllabary,
   // at last, complete the metadata
   std::strncpy(metadata->format, kPrismFormat,
                prism::Metadata::kFormatMaxLength);
+  format_ = 6.0;
   return true;
+}
+
+bool Prism::GetSyllabary(Syllabary* result) const {
+  if (!result || !IsOpen() || !has_syllabary())
+    return false;
+  for (const auto& code : metadata_->syllabary)
+    result->insert(code.c_str());
+  return true;
+}
+
+string Prism::GetSyllableById(SyllableId id) const {
+  if (!IsOpen() || !has_syllabary() || id < 0 ||
+      static_cast<size_t>(id) >= metadata_->syllabary.size)
+    return {};
+  return metadata_->syllabary.at[id].c_str();
 }
 
 bool Prism::HasKey(std::string_view key) {

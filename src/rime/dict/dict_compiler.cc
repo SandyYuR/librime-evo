@@ -10,6 +10,7 @@
 #include <cfloat>
 #include <cmath>
 #include <fstream>
+#include <sstream>
 #include <cctype>
 #include <boost/algorithm/string.hpp>
 #include <rime/algo/strings.h>
@@ -91,7 +92,9 @@ static uint32_t compute_dict_file_checksum(uint32_t initial_checksum,
   return cc.Checksum();
 }
 
-uint64_t DictCompiler::EstimateMemory(const string& dict_name, bool auxiliary) {
+uint64_t DictCompiler::EstimateMemory(const string& dict_name,
+                                      bool auxiliary,
+                                      const vector<string>& packs) {
   constexpr uint64_t kEstimatedBytesPerSourceByte = 32;
   the<ResourceResolver> resolver(
       Service::instance().CreateResourceResolver({"source_file", "", ""}));
@@ -110,6 +113,8 @@ uint64_t DictCompiler::EstimateMemory(const string& dict_name, bool auxiliary) {
     if (settings.use_preset_vocabulary())
       sources.insert(PresetVocabulary::DictFilePath(settings.vocabulary()));
   }
+  for (const auto& pack : packs)
+    sources.insert(resolver->ResolvePath(pack + ".dict.yaml"));
   uint64_t size = 0;
   const auto maximum = std::numeric_limits<uint64_t>::max();
   for (const auto& file : sources) {
@@ -151,6 +156,10 @@ bool DictCompiler::ReadDictionarySpecs(Config* schema,
       LOG(ERROR) << "duplicate table build: " << definition.name;
       return false;
     }
+    if (!table_names.insert(definition.name + ".packs").second) {
+      LOG(ERROR) << "dictionary conflicts with a generated packs table";
+      return false;
+    }
     if (auto packs_item = entry->Get("packs")) {
       auto packs = As<ConfigList>(packs_item);
       if (!packs) {
@@ -158,6 +167,7 @@ bool DictCompiler::ReadDictionarySpecs(Config* schema,
                    << "' packs must be a list";
         return false;
       }
+      hash_set<string> sources;
       for (const auto& pack_item : *packs) {
         auto pack = As<ConfigValue>(pack_item);
         if (!pack || pack->str().empty()) {
@@ -165,8 +175,9 @@ bool DictCompiler::ReadDictionarySpecs(Config* schema,
                      << "'";
           return false;
         }
-        if (!table_names.insert(pack->str()).second) {
-          LOG(ERROR) << "duplicate table build: " << pack->str();
+        if (pack->str() == definition.name ||
+            !sources.insert(pack->str()).second) {
+          LOG(ERROR) << "duplicate packs source: " << pack->str();
           return false;
         }
         definition.packs.push_back(pack->str());
@@ -279,19 +290,25 @@ bool DictCompiler::Compile(const path& schema_file) {
                << ".table.bin exists.";
     return false;
   }
-  {
-    the<ResourceResolver> resolver(
-        Service::instance().CreateDeployedResourceResolver(
-            {"find_reverse_db", "", ".reverse.bin"}));
-    ReverseDb reverse_db(resolver->ResolvePath(dict_name_));
-    if (!reverse_db.Exists() || !reverse_db.Load() ||
-        reverse_db.dict_file_checksum() != dict_file_checksum) {
-      rebuild_table = true;
-    }
-  }
+  the<ResourceResolver> reverse_resolver(
+      Service::instance().CreateDeployedResourceResolver(
+          {"reverse_db", "", ".reverse.bin"}));
+  auto reverse = New<ReverseDb>(reverse_resolver->ResolvePath(dict_name_));
+  const bool reverse_ready = reverse->Exists() && reverse->Load();
+  if (!reverse_ready || reverse->dict_file_checksum() != dict_file_checksum)
+    rebuild_table = true;
   if (build_table_from_source && (options_ & kRebuildTable)) {
     rebuild_table = true;
   }
+  // Encoder configuration may materialize optional nodes; hash the source
+  // settings before collecting either table so cache keys stay stable.
+  string settings_yaml;
+  if (!packs_.empty()) {
+    std::ostringstream root_settings;
+    settings.SaveToStream(root_settings);
+    settings_yaml = root_settings.str();
+  }
+  reverse->Close();
   Syllabary syllabary;
   if (rebuild_table) {
     if (!build_table_from_source) {
@@ -300,16 +317,83 @@ bool DictCompiler::Compile(const path& schema_file) {
       return false;
     }
     EntryCollector collector;
-    if (!BuildTable(0, collector, &settings, dict_files, dict_file_checksum)) {
+    if (!BuildTable(0, collector, &settings, dict_files, dict_file_checksum))
+      return false;
+    reverse = New<ReverseDb>(
+        target_resolver_->ResolvePath(dict_name_ + ".reverse.bin"));
+    syllabary = std::move(collector.syllabary);
+  } else {
+    if (!primary_table->Load() || !primary_table->GetSyllabary(&syllabary))
+      return false;
+    primary_table->Close();
+  }
+
+  // Packs may omit phrase codes; derive them only from the primary dictionary.
+  auto lookup_primary = [&](const string& word) {
+    string codes;
+    if (reverse->IsOpen() || reverse->Load()) {
+      if (!reverse->Lookup(word + "\x1fstem", &codes))
+        reverse->Lookup(word, &codes);
+    }
+    return codes;
+  };
+  bool rebuild_packs = false;
+  uint32_t packs_checksum = 0;
+  if (!packs_.empty()) {
+    vector<path> sources;
+    for (const auto& source : packs_) {
+      auto file = source_resolver_->ResolvePath(source + ".dict.yaml");
+      if (!std::filesystem::exists(file)) {
+        LOG(ERROR) << "missing packs source: " << file;
+        return false;
+      }
+      sources.push_back(std::move(file));
+    }
+    // Automatic phrase encoding depends on primary readings and stems.
+    boost::crc_32_type fingerprint(dict_file_checksum);
+    fingerprint.process_bytes(settings_yaml.data(), settings_yaml.size());
+    packs_checksum =
+        compute_dict_file_checksum(fingerprint.checksum(), sources, settings);
+    auto& table = tables_[1];
+    rebuild_packs =
+        (options_ & kRebuildTable) || !table->Exists() || !table->Load();
+    if (!rebuild_packs) {
+      rebuild_packs = table->dict_file_checksum() != packs_checksum;
+      table->Close();
+    }
+    if (rebuild_packs) {
+      EntryCollector collector;
+      collector.set_include_preset_phrases(false);
+      collector.SetFallbackLookup(lookup_primary);
+      DictSettings pack_settings;
+      std::istringstream yaml(settings_yaml);
+      if (!pack_settings.LoadFromStream(yaml))
+        return false;
+      if (!BuildTable(1, collector, &pack_settings, sources, packs_checksum))
+        return false;
+      syllabary.insert(collector.syllabary.begin(), collector.syllabary.end());
+    } else {
+      if (!table->Load() || !table->GetSyllabary(&syllabary))
+        return false;
+      table->Close();
+    }
+  } else {
+    std::error_code ec;
+    std::filesystem::remove(
+        target_resolver_->ResolvePath(dict_name_ + ".packs.table.bin"), ec);
+    if (ec) {
+      LOG(ERROR) << "cannot remove unused packs table: " << ec.message();
       return false;
     }
-    syllabary = std::move(collector.syllabary);
-  } else if (packs_.size() > 0) {
-    if (primary_table->Load() && primary_table->GetSyllabary(&syllabary))
-      primary_table->Close();
-    else
-      LOG(WARNING) << "couldn't load syllabary from '" << schema_file << "'";
   }
+
+  // Prism invalidation depends on the code set, not word weights or text.
+  boost::crc_32_type code_checksum;
+  for (const auto& code : syllabary)
+    code_checksum.process_bytes(code.c_str(), code.size() + 1);
+  const bool has_packs = !packs_.empty();
+  code_checksum.process_byte(has_packs ? 1 : 0);
+  const auto syllabary_checksum = code_checksum.checksum();
   if (prism_specs_.empty())
     prism_specs_.push_back({prism_, nullptr});
   for (const auto& spec : prism_specs_) {
@@ -326,59 +410,17 @@ bool DictCompiler::Compile(const path& schema_file) {
       }
     }
     const uint32_t algebra_checksum = checksum.checksum();
-    bool rebuild_prism = true;
+    bool rebuild = true;
     if (prism_->Exists() && prism_->Load()) {
-      rebuild_prism = prism_->dict_file_checksum() != dict_file_checksum ||
-                      prism_->schema_file_checksum() != algebra_checksum;
+      rebuild = prism_->dict_file_checksum() != syllabary_checksum ||
+                prism_->schema_file_checksum() != algebra_checksum ||
+                !prism_->has_syllabary();
       prism_->Close();
     }
-    if ((rebuild_prism || (options_ & kRebuildPrism)) &&
-        !BuildPrism(spec.algebra, dict_file_checksum, algebra_checksum))
+    if ((rebuild || (options_ & kRebuildPrism)) &&
+        !BuildPrism(spec.algebra, syllabary, has_packs, syllabary_checksum,
+                    algebra_checksum))
       return false;
-  }
-  for (int table_index = 1; table_index < tables_.size(); ++table_index) {
-    const auto& pack_name = packs_[table_index - 1];
-    auto pack_table = tables_[table_index];
-    DictSettings settings;
-    auto dict_file = source_resolver_->ResolvePath(pack_name + ".dict.yaml");
-    if (!std::filesystem::exists(dict_file)) {
-      if (pack_table->Exists())
-        LOG(INFO) << "pack source file '" << dict_file
-                  << "' does not exist, using prebuilt table '"
-                  << pack_table->file_path() << "'";
-      else
-        LOG(ERROR) << "neither pack source file '" << dict_file
-                   << "' nor a prebuilt table exists";
-      continue;
-    }
-    if (!load_dict_settings_from_file(&settings, dict_file)) {
-      LOG(ERROR) << "failed to load settings from '" << dict_file << "'.";
-      continue;
-    }
-    vector<path> dict_files;
-    if (!get_dict_files_from_settings(&dict_files, settings,
-                                      source_resolver_.get())) {
-      continue;
-    }
-    uint32_t pack_file_checksum =
-        compute_dict_file_checksum(dict_file_checksum, dict_files, settings);
-    bool rebuild_pack = true;
-    if (pack_table->Exists() && pack_table->Load()) {
-      rebuild_pack = pack_table->dict_file_checksum() != pack_file_checksum;
-    }
-    pack_table->Close();
-    EntryCollector collector(std::move(syllabary));
-    if (rebuild_pack) {
-      LOG(INFO) << "rebuilding pack '" << pack_name << "'";
-      if (!BuildTable(table_index, collector, &settings, dict_files,
-                      pack_file_checksum)) {
-        LOG(ERROR) << "failed to build pack: " << pack_name;
-      }
-    } else {
-      LOG(INFO) << "pack '" << pack_name << "' reuses up-to-date table '"
-                << pack_table->file_path() << "'";
-    }
-    syllabary = std::move(collector.syllabary);
   }
   // done!
   return true;
@@ -446,26 +488,14 @@ bool DictCompiler::BuildTable(int table_index,
       return false;
     }
   }
-  // build reverse db for the primary table
-  if (table_index == 0 &&
-      !BuildReverseDb(settings, collector, vocabulary, dict_file_checksum)) {
-    return false;
-  }
-  return true;
-}
-
-bool DictCompiler::BuildReverseDb(DictSettings* settings,
-                                  const EntryCollector& collector,
-                                  const Vocabulary& vocabulary,
-                                  uint32_t dict_file_checksum) {
-  // build .reverse.bin
-  auto target_path = target_resolver_->ResolvePath(dict_name_ + ".reverse.bin");
-  ReverseDb reverse_db(target_path);
-  if (!reverse_db.Build(settings, collector.syllabary, vocabulary,
-                        collector.stems, dict_file_checksum) ||
-      !reverse_db.Save()) {
-    LOG(ERROR) << "error building reversedb.";
-    return false;
+  // Reuse the primary vocabulary without rereading the source or table file.
+  if (table_index == 0) {
+    ReverseDb reverse(
+        target_resolver_->ResolvePath(dict_name_ + ".reverse.bin"));
+    if (!reverse.Build(settings, collector.syllabary, vocabulary,
+                       collector.stems, dict_file_checksum) ||
+        !reverse.Save())
+      return false;
   }
   return true;
 }
@@ -646,6 +676,8 @@ bool DictCompiler::CompileAuxiliary(const path& schema_file) {
 }
 
 bool DictCompiler::BuildPrism(const an<ConfigList>& algebra,
+                              const Syllabary& syllabary,
+                              bool has_packs,
                               uint32_t dict_file_checksum,
                               uint32_t schema_file_checksum) {
   LOG(INFO) << "building prism...";
@@ -653,11 +685,7 @@ bool DictCompiler::BuildPrism(const an<ConfigList>& algebra,
       relocate_target(prism_->file_path(), target_resolver_.get());
   prism_ = New<Prism>(target_path);
 
-  // get syllabary from primary table, which may not be rebuilt
-  Syllabary syllabary;
-  const auto& primary_table = tables_[0];
-  if (!primary_table->Load() || !primary_table->GetSyllabary(&syllabary) ||
-      syllabary.empty())
+  if (syllabary.empty())
     return false;
   Script script;
   if (algebra) {
@@ -690,7 +718,7 @@ bool DictCompiler::BuildPrism(const an<ConfigList>& algebra,
   {
     prism_->Remove();
     if (!prism_->Build(syllabary, script.empty() ? nullptr : &script,
-                       dict_file_checksum, schema_file_checksum) ||
+                       dict_file_checksum, schema_file_checksum, has_packs) ||
         !prism_->Save()) {
       return false;
     }

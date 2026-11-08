@@ -22,6 +22,12 @@ EntryCollector::EntryCollector(Syllabary&& fixed_syllabary)
 
 EntryCollector::~EntryCollector() {}
 
+void EntryCollector::SetFallbackLookup(
+    std::function<string(const string&)> lookup) {
+  fallback_lookup = std::move(lookup);
+  fallback_codes_.clear();
+}
+
 void EntryCollector::Configure(DictSettings* settings) {
   if (settings->use_preset_vocabulary()) {
     LoadPresetVocabulary(settings);
@@ -113,7 +119,7 @@ void EntryCollector::Collect(const path& dict_file) {
         !row[stem_column].empty())
       stem_str = row[stem_column];
     // collect entry
-    if (preset_vocabulary)
+    if (preset_vocabulary && include_preset_phrases)
       collection.insert(word);
     if (!code_str.empty()) {
       CreateEntry(word, code_str, weight_str);
@@ -142,7 +148,7 @@ void EntryCollector::Finish() {
     encode_queue.pop();
   }
   LOG(INFO) << "Pass 2: total " << num_entries << " entries collected.";
-  if (preset_vocabulary) {
+  if (preset_vocabulary && include_preset_phrases) {
     preset_vocabulary->Reset();
     string phrase, weight_str;
     while (preset_vocabulary->GetNextEntry(&phrase, &weight_str)) {
@@ -152,9 +158,9 @@ void EntryCollector::Finish() {
         LOG(WARNING) << "Encode failure: '" << phrase << "'.";
       }
     }
-    // Finish collection before releasing preset weights used by CreateEntry().
-    preset_vocabulary.reset();
   }
+  // Percent weights must remain available until all queued phrases are encoded.
+  preset_vocabulary.reset();
   decltype(collection)().swap(collection);
   decltype(words)().swap(words);
   decltype(total_weight)().swap(total_weight);
@@ -243,6 +249,16 @@ bool EntryCollector::TranslateWord(const string& word, vector<string>* result) {
       result->push_back(v.first);
     }
     return true;
+  }
+  if (fallback_lookup) {
+    auto found = fallback_codes_.find(word);
+    if (found == fallback_codes_.end())
+      found = fallback_codes_.emplace(word, fallback_lookup(word)).first;
+    if (!found->second.empty()) {
+      boost::split(*result, found->second, boost::is_any_of(" "),
+                   boost::token_compress_on);
+      return !result->empty();
+    }
   }
   return false;
 }

@@ -67,8 +67,9 @@ version: "1.0"
                              "build_dict_pack_a", "build_dict_pack_b"}) {
       for (const char* suffix :
            {".dict.yaml", ".table.bin", ".reverse.bin", ".prism.bin",
-            ".pinyin.prism.bin", ".zrm.prism.bin", ".dictionary.prism.bin",
-            ".prism.prism.bin", ".prisms.prism.bin"}) {
+            ".packs.table.bin", ".packs.reverse.bin", ".pinyin.prism.bin",
+            ".zrm.prism.bin", ".dictionary.prism.bin", ".prism.prism.bin",
+            ".prisms.prism.bin"}) {
         std::remove((string(name) + suffix).c_str());
       }
     }
@@ -377,7 +378,7 @@ TEST_F(RimeBuildDictionaryTest, RejectsDuplicateTargetsAndMalformedAlgebra) {
         "      packs: [build_dict_test]\n",
         "build:\n  dictionaries:\n    build_dict_test:\n"
         "      packs: [build_dict_other]\n"
-        "    build_dict_other: {}\n"}) {
+        "    build_dict_test.packs: {}\n"}) {
     SCOPED_TRACE(invalid);
     WriteSchema(invalid);
     EXPECT_FALSE(DictCompiler::CompileDictionaries(schema_path_));
@@ -458,7 +459,7 @@ TEST_F(RimeBuildDictionaryTest, TableEncoderLoadsStemsAndCreatesUserPhrase) {
   EXPECT_NE(string::npos, Query(translator.get(), "nh").find("你好"));
 }
 
-TEST_F(RimeBuildDictionaryTest, PrebuiltPackDoesNotLoseFollowingPackSyllables) {
+TEST_F(RimeBuildDictionaryTest, PacksSourcesShareOneIndependentTable) {
   for (const char* name : {"build_dict_pack_a", "build_dict_pack_b"}) {
     std::ofstream file(string(name) + ".dict.yaml");
     file << "---\nname: " << name << "\nversion: '1.0'\n...\n";
@@ -474,13 +475,15 @@ TEST_F(RimeBuildDictionaryTest, PrebuiltPackDoesNotLoseFollowingPackSyllables) {
 translator:
   dictionary: build_dict_test
   prism: zrm
-  packs: [build_dict_pack_a, build_dict_pack_b]
   user_dict_mode: off
   enable_completion: false
   enable_sentence: false
 )YAML");
   ASSERT_TRUE(DictCompiler::CompileDictionaries(schema_path_));
-  std::remove("build_dict_pack_a.dict.yaml");
+  EXPECT_TRUE(std::filesystem::exists("build_dict_test.packs.table.bin"));
+  EXPECT_FALSE(std::filesystem::exists("build_dict_test.packs.reverse.bin"));
+  EXPECT_FALSE(std::filesystem::exists("build_dict_pack_a.table.bin"));
+  EXPECT_FALSE(std::filesystem::exists("build_dict_pack_b.table.bin"));
   std::ofstream("build_dict_pack_b.dict.yaml", std::ios::app)
       << "毫\thao\t150\n";
   ASSERT_TRUE(DictCompiler::CompileDictionaries(schema_path_));

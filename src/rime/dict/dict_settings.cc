@@ -22,6 +22,7 @@ bool DictSettings::LoadDictHeader(std::istream& stream, bool allow_headerless) {
   if (allow_headerless) {
     auto start = stream.tellg();
     string first;
+    bool has_header = false;
     while (std::getline(stream, first)) {
       boost::algorithm::trim(first);
       if (first.empty() || first[0] == '#')
@@ -31,10 +32,13 @@ bool DictSettings::LoadDictHeader(std::istream& stream, bool allow_headerless) {
         stream.seekg(start);
         return true;
       }
+      has_header = true;
       break;
     }
     stream.clear();
     stream.seekg(start);
+    if (!has_header)
+      return true;
   }
   std::stringstream header;
   string line;

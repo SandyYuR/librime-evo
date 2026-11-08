@@ -8,6 +8,7 @@
 #define RIME_ENTRY_COLLECTOR_H_
 
 #include <queue>
+#include <functional>
 #include <rime/common.h>
 #include <rime/algo/encoder.h>
 #include <rime/dict/dictionary.h>
@@ -47,6 +48,10 @@ class EntryCollector : public PhraseCollector {
   virtual ~EntryCollector();
 
   void Configure(DictSettings* settings);
+  void SetFallbackLookup(std::function<string(const string&)> lookup);
+  void set_include_preset_phrases(bool value) {
+    include_preset_phrases = value;
+  }
   // Collect all tables in one batch; temporary encoding data is released after.
   void Collect(const vector<path>& dict_files);
 
@@ -70,10 +75,13 @@ class EntryCollector : public PhraseCollector {
   the<Encoder> encoder;
   EncodeQueue encode_queue;
   set<string /* word */> collection;
+  std::function<string(const string&)> fallback_lookup;
   WordMap words;
   WeightMap total_weight;
 
  private:
+  bool include_preset_phrases = true;
+  map<string, string> fallback_codes_;
   string current_dict_file;
   size_t line_number;
 };

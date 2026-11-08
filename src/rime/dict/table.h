@@ -95,6 +95,25 @@ struct Metadata {
 
 struct AuxiliaryPath;
 
+struct SyllableIdMap {
+  vector<SyllableId> to_local;
+  vector<SyllableId> to_global;
+  SyllableId Local(SyllableId id) const {
+    return to_local.empty()
+               ? id
+               : (id >= 0 && static_cast<size_t>(id) < to_local.size()
+                      ? to_local[id]
+                      : -1);
+  }
+  SyllableId Global(SyllableId id) const {
+    return to_global.empty()
+               ? id
+               : (id >= 0 && static_cast<size_t>(id) < to_global.size()
+                      ? to_global[id]
+                      : -1);
+  }
+};
+
 class TableAccessor {
  public:
   TableAccessor() = default;
@@ -122,6 +141,8 @@ class TableAccessor {
   RIME_DLL const table::Code* extra_code() const;
   const Code& index_code() const { return index_code_; }
   Code code() const;
+  void set_code_map(const SyllableIdMap* map) { code_map_ = map; }
+  const SyllableIdMap* code_map() const { return code_map_; }
   double credibility() const { return credibility_; }
   double quality_len() const { return quality_len_; }
   bool abbreviated_auxiliary() const { return abbreviated_auxiliary_; }
@@ -134,6 +155,7 @@ class TableAccessor {
 
  private:
   Code index_code_;
+  const SyllableIdMap* code_map_ = nullptr;
   const table::Entry* entries_ = nullptr;
   const table::LongEntry* long_entries_ = nullptr;
   size_t size_ = 0;
@@ -150,7 +172,10 @@ struct SyllableGraph;
 
 class TableQuery {
  public:
-  TableQuery(table::Index* index) : lv1_index_(index) { Reset(); }
+  TableQuery(table::Index* index, const SyllableIdMap* code_map = nullptr)
+      : code_map_(code_map), lv1_index_(index) {
+    Reset();
+  }
 
   TableAccessor Access(SyllableId syllable_id,
                        double credibility = 0.0,
@@ -194,6 +219,7 @@ class TableQuery {
  private:
   bool Walk(SyllableId syllable_id);
 
+  const SyllableIdMap* code_map_ = nullptr;
   table::HeadIndex* lv1_index_ = nullptr;
   table::TrunkIndex* lv2_index_ = nullptr;
   table::TrunkIndex* lv3_index_ = nullptr;
@@ -214,11 +240,14 @@ class Table : public MappedFile {
 
   bool GetSyllabary(Syllabary* syllabary);
   RIME_DLL string GetSyllableById(int syllable_id);
-  RIME_DLL TableAccessor QueryWords(int syllable_id);
-  RIME_DLL TableAccessor QueryPhrases(const Code& code);
+  RIME_DLL TableAccessor QueryWords(int syllable_id,
+                                    const SyllableIdMap* code_map = nullptr);
+  RIME_DLL TableAccessor QueryPhrases(const Code& code,
+                                      const SyllableIdMap* code_map = nullptr);
   RIME_DLL bool Query(const SyllableGraph& syll_graph,
                       size_t start_pos,
-                      TableQueryResult* result);
+                      TableQueryResult* result,
+                      const SyllableIdMap* code_map = nullptr);
   RIME_DLL string GetEntryText(const table::Entry& entry);
 
   uint32_t dict_file_checksum() const;

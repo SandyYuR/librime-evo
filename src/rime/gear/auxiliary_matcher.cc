@@ -57,16 +57,7 @@ void AuxiliaryMatcher::Lookup(const string& input,
       auto cached = characters_by_syllable_.find(id);
       if (cached == characters_by_syllable_.end()) {
         std::set<string> characters;
-        for (const auto& table : primary_->tables()) {
-          if (!table->IsOpen())
-            continue;
-          for (auto words = table->QueryWords(id); !words.exhausted();
-               words.Next()) {
-            const string text = table->GetEntryText(*words.entry());
-            if (!text.empty() && utf8::distance(text.begin(), text.end()) == 1)
-              characters.insert(text);
-          }
-        }
+        primary_->LookupCharacters(id, &characters);
         cached =
             characters_by_syllable_.emplace(id, std::move(characters)).first;
       }

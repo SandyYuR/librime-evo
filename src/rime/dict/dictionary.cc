@@ -107,6 +107,7 @@ struct CodeMatch {
 };
 
 CodeMatch match_extra_code(const table::Code* extra_code,
+                           const SyllableIdMap* code_map,
                            size_t depth,
                            const SyllableGraph& syll_graph,
                            size_t current_pos,
@@ -123,14 +124,17 @@ CodeMatch match_extra_code(const table::Code* extra_code,
   auto index = syll_graph.indices.find(current_pos);
   if (index == syll_graph.indices.end())
     return kFailed;
-  SyllableId current_syll_id = extra_code->at[depth];
+  SyllableId current_syll_id = code_map
+                                   ? code_map->Global(extra_code->at[depth])
+                                   : extra_code->at[depth];
   auto spellings = index->second.find(current_syll_id);
   if (spellings == index->second.end())
     return kFailed;
   CodeMatch best_match = kFailed;
   for (const SpellingProperties* props : spellings->second) {
-    CodeMatch match = match_extra_code(extra_code, depth + 1, syll_graph,
-                                       props->end_pos, predict_word);
+    CodeMatch match =
+        match_extra_code(extra_code, code_map, depth + 1, syll_graph,
+                         props->end_pos, predict_word);
     if (!match.success)
       continue;
     if (match.end_pos > best_match.end_pos)
@@ -150,6 +154,7 @@ struct AuxiliaryCodeMatch {
 // Match each tail against its own text, preserving the chosen AUX path's score.
 void collect_extra_code_matches(
     const table::Code* extra_code,
+    const SyllableIdMap* code_map,
     size_t depth,
     const SyllableGraph& graph,
     size_t pos,
@@ -173,7 +178,9 @@ void collect_extra_code_matches(
   auto index = graph.indices.find(pos);
   if (index == graph.indices.end())
     return;
-  auto found = index->second.find(extra_code->at[depth]);
+  auto found =
+      index->second.find(code_map ? code_map->Global(extra_code->at[depth])
+                                  : extra_code->at[depth]);
   if (found == index->second.end())
     return;
   for (const auto* props : found->second) {
@@ -182,8 +189,8 @@ void collect_extra_code_matches(
          !props->auxiliary_chars->count(characters[prefix_depth + depth])))
       continue;
     collect_extra_code_matches(
-        extra_code, depth + 1, graph, props->end_pos, predict_word, characters,
-        prefix_depth, credibility + props->credibility,
+        extra_code, code_map, depth + 1, graph, props->end_pos, predict_word,
+        characters, prefix_depth, credibility + props->credibility,
         abbreviated || (props->auxiliary_chars && props->type == kAbbreviation),
         matches, seen);
   }
@@ -463,7 +470,10 @@ bool Dictionary::SetPrism(const string& name) {
   auto it = prisms_.find(name);
   if (it == prisms_.end() || !it->second)
     return false;
-  prism_ = it->second;
+  if (prism_ != it->second) {
+    prism_ = it->second;
+    bindings_valid_ = false;
+  }
   return true;
 }
 
@@ -472,9 +482,10 @@ static void lookup_table(Table* table,
                          const SyllableGraph& syllable_graph,
                          size_t start_pos,
                          bool predict_word,
-                         double initial_credibility) {
+                         double initial_credibility,
+                         const SyllableIdMap* code_map) {
   TableQueryResult result;
-  if (!table->Query(syllable_graph, start_pos, &result)) {
+  if (!table->Query(syllable_graph, start_pos, &result, code_map)) {
     return;
   }
   // copy result
@@ -487,7 +498,8 @@ static void lookup_table(Table* table,
         do {
           if (!syllable_graph.has_auxiliary) {
             dictionary::CodeMatch match = dictionary::match_extra_code(
-                a.extra_code(), 0, syllable_graph, end_pos, predict_word);
+                a.extra_code(), a.code_map(), 0, syllable_graph, end_pos,
+                predict_word);
             if (!match.success)
               continue;
             size_t matching_code_size = a.index_code().size() + match.depth;
@@ -511,9 +523,9 @@ static void lookup_table(Table* table,
               matches;
           map<std::tuple<size_t, size_t, bool>, double> seen;
           dictionary::collect_extra_code_matches(
-              a.extra_code(), 0, syllable_graph, end_pos, predict_word,
-              characters, a.index_code().size(), cr, a.abbreviated_auxiliary(),
-              &matches, &seen);
+              a.extra_code(), a.code_map(), 0, syllable_graph, end_pos,
+              predict_word, characters, a.index_code().size(), cr,
+              a.abbreviated_auxiliary(), &matches, &seen);
           for (const auto& item : matches) {
             const auto& match = item.second;
             const size_t matching = a.index_code().size() + match.depth;
@@ -537,11 +549,12 @@ an<DictEntryCollector> Dictionary::Lookup(const SyllableGraph& syllable_graph,
   if (!loaded())
     return nullptr;
   auto collector = New<DictEntryCollector>();
-  for (const auto& table : tables_) {
+  for (size_t i = 0; i < tables_.size(); ++i) {
+    const auto& table = tables_[i];
     if (!table->IsOpen())
       continue;
     lookup_table(table.get(), collector.get(), syllable_graph, start_pos,
-                 predict_word, initial_credibility);
+                 predict_word, initial_credibility, &code_maps_[i]);
   }
   // Every returned iterator must contain a candidate after filtering.
   for (auto it = collector->begin(); it != collector->end();) {
@@ -589,14 +602,17 @@ size_t Dictionary::LookupWords(DictEntryIterator* result,
         continue;
       string remaining_code;
       if (match.length > code_length) {
-        string syllable = primary_table()->GetSyllableById(syllable_id);
+        string syllable = prism_->has_syllabary()
+                              ? prism_->GetSyllableById(syllable_id)
+                              : primary_table()->GetSyllableById(syllable_id);
         if (syllable.length() > code_length)
           remaining_code = syllable.substr(code_length);
       }
-      for (const auto& table : tables_) {
+      for (size_t i = 0; i < tables_.size(); ++i) {
+        const auto& table = tables_[i];
         if (!table->IsOpen())
           continue;
-        TableAccessor a = table->QueryWords(syllable_id);
+        TableAccessor a = table->QueryWords(syllable_id, &code_maps_[i]);
         if (!a.exhausted()) {
           DLOG(INFO) << "remaining code: " << remaining_code;
           result->AddChunk({table.get(), a, remaining_code});
@@ -612,12 +628,27 @@ size_t Dictionary::LookupWords(DictEntryIterator* result,
   return keys.size();
 }
 
+void Dictionary::LookupCharacters(SyllableId id, set<string>* result) {
+  if (!result || !loaded())
+    return;
+  for (size_t i = 0; i < tables_.size(); ++i) {
+    auto words = tables_[i]->QueryWords(id, &code_maps_[i]);
+    while (!words.exhausted()) {
+      const string text = tables_[i]->GetEntryText(*words.entry());
+      if (!text.empty() && utf8::distance(text.begin(), text.end()) == 1)
+        result->insert(text);
+      words.Next();
+    }
+  }
+}
+
 bool Dictionary::Decode(const Code& code, vector<string>* result) {
   if (!result || tables_.empty())
     return false;
   result->clear();
   for (SyllableId c : code) {
-    string s = primary_table()->GetSyllableById(c);
+    string s = prism_->has_syllabary() ? prism_->GetSyllableById(c)
+                                       : primary_table()->GetSyllableById(c);
     if (s.empty())
       return false;
     result->push_back(s);
@@ -641,6 +672,7 @@ bool Dictionary::Remove() {
 }
 
 bool Dictionary::Load() {
+  bindings_valid_ = false;
   LOG(INFO) << "loading dictionary '" << name_ << "'.";
   if (tables_.empty()) {
     LOG(ERROR) << "Cannot load dictionary '" << name_
@@ -656,18 +688,70 @@ bool Dictionary::Load() {
     LOG(ERROR) << "Error loading prism for dictionary '" << name_ << "'.";
     return false;
   }
-  // packs are optional
-  for (int i = 1; i < tables_.size(); ++i) {
-    const auto& table = tables_[i];
-    if (!table->IsOpen() && table->Exists() && table->Load()) {
-      LOG(INFO) << "loaded pack: " << packs_[i - 1];
+  if (prism_->has_packs()) {
+    if (tables_.size() < 2) {
+      the<ResourceResolver> resolver(
+          Service::instance().CreateDeployedResourceResolver(
+              {"table", "", ".table.bin"}));
+      tables_.push_back(New<Table>(resolver->ResolvePath(name_ + ".packs")));
+    }
+    if (!tables_[1]->IsOpen() && !tables_[1]->Load()) {
+      LOG(ERROR) << "missing compiled supplement for dictionary '" << name_
+                 << "'";
+      return false;
+    }
+  } else {
+    // Without supplements, table and prism already share the same ids.
+    tables_.resize(1);
+    code_maps_.clear();
+    code_maps_.resize(1);
+    bindings_valid_ = true;
+    return true;
+  }
+  Syllabary canonical;
+  if (prism_->has_syllabary() && !prism_->GetSyllabary(&canonical))
+    return false;
+  hash_map<string, SyllableId> ids;
+  SyllableId next = 0;
+  for (const auto& code : canonical)
+    ids[code] = next++;
+  code_maps_.clear();
+  code_maps_.resize(tables_.size());
+  Syllabary actual;
+  for (size_t i = 0; i < tables_.size(); ++i) {
+    Syllabary local;
+    if (!tables_[i]->GetSyllabary(&local))
+      return false;
+    actual.insert(local.begin(), local.end());
+    if (canonical.empty() || canonical == local)
+      continue;
+    auto& mapping = code_maps_[i];
+    mapping.to_local.resize(canonical.size(), -1);
+    mapping.to_global.reserve(local.size());
+    SyllableId local_id = 0;
+    for (const auto& code : local) {
+      auto found = ids.find(code);
+      if (found == ids.end()) {
+        LOG(ERROR) << "prism is stale for dictionary '" << name_ << "'";
+        return false;
+      }
+      mapping.to_global.push_back(found->second);
+      mapping.to_local[found->second] = local_id++;
     }
   }
+  if (prism_->has_syllabary() && canonical != actual) {
+    LOG(ERROR) << "table and prism code sets differ for dictionary '" << name_
+               << "'";
+    return false;
+  }
+  bindings_valid_ = true;
   return true;
 }
 
 bool Dictionary::loaded() const {
-  return !tables_.empty() && tables_[0]->IsOpen() && prism_ && prism_->IsOpen();
+  return bindings_valid_ && !tables_.empty() && tables_[0]->IsOpen() &&
+         (tables_.size() == 1 || tables_[1]->IsOpen()) && prism_ &&
+         prism_->IsOpen();
 }
 
 // DictionaryComponent members
@@ -716,14 +800,12 @@ Dictionary* DictionaryComponent::Create(const Ticket& ticket) {
       }
     }
   }
-  vector<string> packs;
-  if (auto pack_list = config->GetList(ticket.name_space + "/packs")) {
-    for (const auto& item : *pack_list) {
-      if (auto value = As<ConfigValue>(item)) {
-        packs.push_back(value->str());
-      }
-    }
+  if (!config->IsNull(ticket.name_space + "/packs")) {
+    LOG(ERROR) << ticket.name_space
+               << "/packs belongs under build/dictionaries/" << dict_name;
+    return nullptr;
   }
+  vector<string> packs;
   const string primary_prism_name = prism_name;
   if (!default_prism)
     prism_name = ResolvePrismName(config, dict_name, prism_name);
@@ -781,13 +863,10 @@ Dictionary* DictionaryComponent::Create(string dict_name,
   }
   auto prism = GetPrism(prism_name);
   vector<of<Table>> tables = {std::move(primary_table)};
-  for (const auto& pack : packs) {
-    auto table = table_map_[pack].lock();
-    if (!table) {
-      auto file_path = table_resource_resolver_->ResolvePath(pack);
-      table_map_[pack] = table = New<Table>(file_path);
-    }
-    tables.push_back(std::move(table));
+  if (!packs.empty()) {
+    auto file_path =
+        table_resource_resolver_->ResolvePath(dict_name + ".packs");
+    tables.push_back(New<Table>(file_path));
   }
   auto dictionary = new Dictionary(std::move(dict_name), std::move(packs),
                                    std::move(tables), std::move(prism));

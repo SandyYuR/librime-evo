@@ -18,7 +18,6 @@ class Config;
 class ConfigList;
 class Prism;
 class Table;
-class ReverseDb;
 class DictSettings;
 class EntryCollector;
 class Vocabulary;
@@ -41,7 +40,8 @@ class DictCompiler {
                                            int options = 0);
   // Imported tables and the preset vocabulary contribute to peak memory.
   RIME_DLL static uint64_t EstimateMemory(const string& dictionary,
-                                          bool auxiliary = false);
+                                          bool auxiliary = false,
+                                          const vector<string>& packs = {});
   struct DictionarySpec {
     string name;
     vector<string> packs;
@@ -67,12 +67,10 @@ class DictCompiler {
                   const vector<path>& dict_files,
                   uint32_t dict_file_checksum);
   bool BuildPrism(const an<ConfigList>& algebra,
+                  const Syllabary& syllabary,
+                  bool has_packs,
                   uint32_t dict_file_checksum,
                   uint32_t schema_file_checksum);
-  bool BuildReverseDb(DictSettings* settings,
-                      const EntryCollector& collector,
-                      const Vocabulary& vocabulary,
-                      uint32_t dict_file_checksum);
 
   const string& dict_name_;
   const vector<string>& packs_;

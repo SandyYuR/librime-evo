@@ -54,7 +54,8 @@ bool ReverseDb::Load() {
   }
   double format = std::atof(&metadata_->format[kReverseFormatPrefixLen]);
   if (format - kReverseFormatCompatible < 0.0 - DBL_EPSILON ||
-      format - kReverseFormatCompatible > 1.0 + DBL_EPSILON) {
+      format >
+          std::atof(kReverseFormat + kReverseFormatPrefixLen) + DBL_EPSILON) {
     LOG(ERROR) << "incompatible reversedb format.";
     Close();
     return false;

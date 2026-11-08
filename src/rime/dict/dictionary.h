@@ -100,6 +100,7 @@ class Dictionary : public Class<Dictionary, const Ticket&> {
                               const hash_set<string>* blacklist = nullptr);
   // translate syllable id sequence to string code
   RIME_DLL bool Decode(const Code& code, vector<string>* result);
+  void LookupCharacters(SyllableId id, set<string>* result);
 
   const string& name() const { return name_; }
   RIME_DLL bool loaded() const;
@@ -117,6 +118,8 @@ class Dictionary : public Class<Dictionary, const Ticket&> {
   vector<of<Table>> tables_;
   an<Prism> prism_;
   map<string, an<Prism>> prisms_;
+  vector<SyllableIdMap> code_maps_;
+  bool bindings_valid_ = false;
 };
 
 class ResourceResolver;

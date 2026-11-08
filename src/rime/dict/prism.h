@@ -47,6 +47,9 @@ struct Metadata {
   char alphabet[256];
   // v5.0
   uint32_t max_key_length;
+  // v6.0: shared code namespace and automatic supplement association.
+  List<String> syllabary;
+  uint32_t has_packs;
 };
 
 }  // namespace prism
@@ -78,7 +81,8 @@ class Prism : public MappedFile {
   RIME_DLL bool Build(const Syllabary& syllabary,
                       const Script* script = nullptr,
                       uint32_t dict_file_checksum = 0,
-                      uint32_t schema_file_checksum = 0);
+                      uint32_t schema_file_checksum = 0,
+                      bool has_packs = false);
 
   RIME_DLL bool HasKey(std::string_view key);
   RIME_DLL bool GetValue(std::string_view key, int* value) const;
@@ -88,6 +92,12 @@ class Prism : public MappedFile {
                              size_t limit);
   SpellingAccessor QuerySpelling(SyllableId spelling_id);
 
+  bool has_syllabary() const { return format_ >= 6.0; }
+  bool has_packs() const {
+    return has_syllabary() && metadata_ && metadata_->has_packs;
+  }
+  RIME_DLL bool GetSyllabary(Syllabary* result) const;
+  RIME_DLL string GetSyllableById(SyllableId id) const;
   RIME_DLL size_t array_size() const;
   RIME_DLL size_t max_key_length() const;
   uint32_t dict_file_checksum() const;

@@ -256,10 +256,8 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
       return true;
     };
     for (const auto& definition : definitions) {
-      uint64_t estimated = DictCompiler::EstimateMemory(definition.name);
-      for (const auto& pack : definition.packs) {
-        estimated = (std::max)(estimated, DictCompiler::EstimateMemory(pack));
-      }
+      const uint64_t estimated = DictCompiler::EstimateMemory(
+          definition.name, false, definition.packs);
       CompileUnit unit(schema_id + ":dictionary:" + definition.name, estimated,
                        [definition, compiled_schema]() {
                          return DictCompiler::CompileDictionary(
@@ -270,8 +268,7 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
       };
       output(definition.name + ".table.bin");
       output(definition.name + ".reverse.bin");
-      for (const auto& pack : definition.packs)
-        output(pack + ".table.bin");
+      output(definition.name + ".packs.table.bin");
       for (const auto& prism : definition.prisms)
         output(prism.first + ".prism.bin");
       if (!add_unit(std::move(unit))) {
