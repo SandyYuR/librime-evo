@@ -458,3 +458,46 @@ algebra:
   ASSERT_TRUE(database.ReverseLookup("你", &codes));
   EXPECT_EQ(3u, codes.size());
 }
+
+TEST_F(RimeAuxiliaryLookupTest,
+       CopiesAndSkipPreserveAuxiliaryPathsAndOrdering) {
+  auto dictionary = OpenDictionary("zrm");
+  AuxiliaryMatcher matcher(dictionary.get(), database_.get());
+  auto drain = [](DictEntryIterator& iterator) {
+    vector<string> entries;
+    while (!iterator.exhausted()) {
+      auto entry = iterator.Peek();
+      entries.push_back(entry->text +
+                        (entry->abbreviated_auxiliary ? ":aux" : ""));
+      iterator.Next();
+    }
+    return entries;
+  };
+  for (const string input : {"nixy", "nizln", "nizlnaliz", "zgjw"}) {
+    SCOPED_TRACE(input);
+    Syllabifier syllabifier(" '", false);
+    syllabifier.SetAuxiliaryLookup(
+        [&matcher](const string& code, vector<AuxGraphMatch>* matches) {
+          matcher.Lookup(code, matches);
+        });
+    SyllableGraph graph;
+    syllabifier.BuildSyllableGraph(input, *dictionary->prism(), &graph);
+    auto collector = dictionary->Lookup(graph, 0);
+    ASSERT_TRUE(collector);
+    auto bucket = collector->find(input.size());
+    ASSERT_NE(collector->end(), bucket);
+    auto& original = bucket->second;
+    DictEntryIterator copy(original);
+    DictEntryIterator assigned;
+    assigned = original;
+    auto fork = original.Fork();
+    const auto expected = drain(copy);
+    ASSERT_FALSE(expected.empty());
+    EXPECT_EQ(expected, drain(assigned));
+    EXPECT_EQ(expected, drain(fork));
+    ASSERT_TRUE(original.Peek());
+    ASSERT_TRUE(original.Skip(1));
+    EXPECT_EQ(vector<string>(expected.begin() + 1, expected.end()),
+              drain(original));
+  }
+}

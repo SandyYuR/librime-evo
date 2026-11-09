@@ -919,3 +919,26 @@ lookup:
   EXPECT_TRUE(std::filesystem::exists("build_dict_test.pinyin.prism.bin"));
   EXPECT_FALSE(std::filesystem::exists("build_dict_test.zrm.prism.bin"));
 }
+
+TEST_F(RimeBuildDictionaryTest,
+       DifferentSchemasReuseIdenticalDictionaryOutputs) {
+  WriteSchema(kDefinitions);
+  ASSERT_TRUE(DictCompiler::CompileDictionaries(schema_path_));
+  vector<std::pair<path, std::filesystem::file_time_type>> times;
+  for (const char* suffix :
+       {".table.bin", ".reverse.bin", ".pinyin.prism.bin", ".zrm.prism.bin"}) {
+    path file{string("build_dict_test") + suffix};
+    times.emplace_back(file, std::filesystem::last_write_time(file));
+  }
+  Config other;
+  ASSERT_TRUE(other.LoadFromFile(schema_path_));
+  other.SetString("schema/schema_id", "build_dict_reuse");
+  const path second{"build_dict_reuse.schema.yaml"};
+  ASSERT_TRUE(other.SaveToFile(second));
+  const bool compiled = DictCompiler::CompileDictionaries(second);
+  std::filesystem::remove(second);
+  ASSERT_TRUE(compiled);
+  for (const auto& item : times)
+    EXPECT_EQ(item.second, std::filesystem::last_write_time(item.first))
+        << item.first;
+}

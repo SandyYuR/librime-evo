@@ -5,6 +5,7 @@
 // 2011-07-05 GONG Chen <chen.sst@gmail.com>
 //
 #include <gtest/gtest.h>
+#include <limits>
 #include <sstream>
 #include <rime/dict/dict_settings.h>
 #include <rime/dict/entry_collector.h>
@@ -152,4 +153,109 @@ TEST_F(RimeDictionaryTest, TableLookupWithExclude) {
   size_t keys = dict_->LookupWords(&iter, input, true, 100, &blacklist);
   EXPECT_EQ(keys, 1);
   EXPECT_TRUE(iter.exhausted());
+}
+
+namespace {
+
+std::vector<std::string> DrainEntries(rime::Dictionary* dictionary,
+                                      rime::DictEntryIterator& iterator) {
+  std::vector<std::string> entries;
+  while (!iterator.exhausted()) {
+    auto entry = iterator.Peek();
+    rime::RawCode code;
+    if (!entry || !dictionary->Decode(entry->code, &code)) {
+      ADD_FAILURE() << "invalid dictionary entry";
+      break;
+    }
+    entries.push_back(entry->text + "\t" + code.ToString());
+    iterator.Next();
+  }
+  return entries;
+}
+
+void ExpectBestFirst(rime::Dictionary* dictionary,
+                     const rime::string& code,
+                     size_t minimum) {
+  rime::DictEntryIterator iterator;
+  dictionary->LookupWords(&iterator, code, true);
+  const size_t total = iterator.entry_count();
+  ASSERT_GE(total, minimum);
+  rime::an<rime::DictEntry> previous;
+  rime::set<std::pair<rime::string, rime::string>> seen;
+  size_t count = 0;
+  while (!iterator.exhausted()) {
+    auto entry = iterator.Peek();
+    ASSERT_TRUE(entry);
+    rime::RawCode spelling;
+    ASSERT_TRUE(dictionary->Decode(entry->code, &spelling));
+    EXPECT_TRUE(seen.emplace(entry->text, spelling.ToString()).second);
+    // LookupWords preserves the first matching key before heap ordering begins.
+    if (count > 1) {
+      if (previous->remaining_code_length == entry->remaining_code_length)
+        EXPECT_GE(previous->weight, entry->weight);
+      else
+        EXPECT_LT(previous->remaining_code_length,
+                  entry->remaining_code_length);
+    }
+    previous = entry;
+    ++count;
+    iterator.Next();
+  }
+  EXPECT_EQ(total, count);
+}
+
+}  // namespace
+
+TEST_F(RimeDictionaryTest, PredictiveLookupOrder) {
+  ExpectBestFirst(dict_.get(), "z", 50);
+  ExpectBestFirst(dict_.get(), "", 1000);
+}
+
+TEST_F(RimeDictionaryTest, CopiedIteratorsAreIndependent) {
+  for (bool heap : {false, true}) {
+    SCOPED_TRACE(heap);
+    rime::DictEntryIterator original;
+    dict_->LookupWords(&original, "z", true);
+    if (heap) {
+      ASSERT_TRUE(original.Next());
+    }
+    const auto cached = original.Peek();
+    ASSERT_TRUE(cached);
+    rime::DictEntryIterator copy(original);
+    rime::DictEntryIterator assigned;
+    assigned = original;
+    auto fork = original.Fork();
+    const auto expected = DrainEntries(dict_.get(), copy);
+    EXPECT_EQ(cached, original.Peek());
+    EXPECT_EQ(expected, DrainEntries(dict_.get(), assigned));
+    EXPECT_EQ(expected, DrainEntries(dict_.get(), fork));
+    EXPECT_EQ(expected, DrainEntries(dict_.get(), original));
+  }
+}
+
+TEST_F(RimeDictionaryTest, SkipDropsCachedEntryAndRebuildsHeap) {
+  for (bool heap : {false, true}) {
+    SCOPED_TRACE(heap);
+    rime::DictEntryIterator cached;
+    rime::DictEntryIterator fresh;
+    dict_->LookupWords(&cached, "z", true);
+    dict_->LookupWords(&fresh, "z", true);
+    if (heap) {
+      ASSERT_TRUE(cached.Next());
+      ASSERT_TRUE(fresh.Next());
+    }
+    const auto first = cached.Peek();
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(cached.Skip(0));
+    EXPECT_EQ(first, cached.Peek());
+    ASSERT_TRUE(cached.Skip(3));
+    ASSERT_TRUE(fresh.Skip(3));
+    EXPECT_EQ(DrainEntries(dict_.get(), fresh),
+              DrainEntries(dict_.get(), cached));
+  }
+  rime::DictEntryIterator oversized;
+  dict_->LookupWords(&oversized, "z", true);
+  ASSERT_TRUE(oversized.Skip(1));
+  EXPECT_FALSE(oversized.Skip(std::numeric_limits<size_t>::max()));
+  EXPECT_TRUE(oversized.exhausted());
 }

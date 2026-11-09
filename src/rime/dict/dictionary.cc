@@ -34,6 +34,7 @@ struct Chunk {
   double quality_len = 0.0;
   bool abbreviated_auxiliary = false;
   std::shared_ptr<const AuxiliaryPath> auxiliary_path;
+  size_t order = 0;
 
   Chunk() = default;
   Chunk(Table* t,
@@ -86,19 +87,32 @@ struct Chunk {
 
 struct QueryResult {
   vector<Chunk> chunks;
+  bool is_heap = false;
+  size_t next_order = 0;
 };
 
-bool compare_chunk_by_head_element(const Chunk& a, const Chunk& b) {
-  if (!a.entries || a.cursor >= a.size)
-    return false;
-  if (!b.entries || b.cursor >= b.size)
-    return true;
+static int compare_head_entries(const Chunk& a, const Chunk& b) {
+  const bool a_exhausted = !a.entries || a.cursor >= a.size;
+  const bool b_exhausted = !b.entries || b.cursor >= b.size;
+  if (a_exhausted || b_exhausted)
+    return int(a_exhausted) - int(b_exhausted);
   if (a.is_exact_match() != b.is_exact_match())
-    return a.is_exact_match() > b.is_exact_match();
+    return a.is_exact_match() ? -1 : 1;
   if (a.remaining_code.length() != b.remaining_code.length())
-    return a.remaining_code.length() < b.remaining_code.length();
-  return a.credibility + a.entries[a.cursor].weight >
-         b.credibility + b.entries[b.cursor].weight;  // by weight desc
+    return a.remaining_code.length() < b.remaining_code.length() ? -1 : 1;
+  const double a_weight = a.credibility + a.entries[a.cursor].weight;
+  const double b_weight = b.credibility + b.entries[b.cursor].weight;
+  if (a_weight > b_weight)
+    return -1;
+  if (a_weight < b_weight)
+    return 1;
+  return 0;
+}
+
+// Heap heads with equal scores retain their insertion order.
+static bool chunk_visited_later(const Chunk& a, const Chunk& b) {
+  const int comparison = compare_head_entries(a, b);
+  return comparison != 0 ? comparison > 0 : a.order > b.order;
 }
 
 struct CodeMatch {
@@ -202,23 +216,47 @@ void collect_extra_code_matches(
 DictEntryIterator::DictEntryIterator()
     : query_result_(New<dictionary::QueryResult>()) {}
 
+// Chunks contain mutable cursors, so iterating a copy must own its query state.
+DictEntryIterator::DictEntryIterator(const DictEntryIterator& other)
+    : DictEntryFilterBinder(other),
+      query_result_(other.query_result_
+                        ? New<dictionary::QueryResult>(*other.query_result_)
+                        : New<dictionary::QueryResult>()),
+      chunk_index_(other.chunk_index_),
+      entry_(other.entry_),
+      entry_count_(other.entry_count_),
+      ordered_entries_(other.ordered_entries_),
+      ordered_index_(other.ordered_index_),
+      ordered_mode_(other.ordered_mode_),
+      has_abbreviated_auxiliary_(other.has_abbreviated_auxiliary_) {}
+
+DictEntryIterator& DictEntryIterator::operator=(
+    const DictEntryIterator& other) {
+  if (this != &other) {
+    DictEntryIterator copy(other);
+    *this = std::move(copy);
+  }
+  return *this;
+}
+
 void DictEntryIterator::AddChunk(dictionary::Chunk&& chunk) {
   chunk.SkipNonMatchingAuxiliary();
   if (chunk.cursor >= chunk.size)
     return;
   has_abbreviated_auxiliary_ |= chunk.abbreviated_auxiliary;
-  query_result_->chunks.push_back(std::move(chunk));
+  chunk.order = query_result_->next_order++;
   entry_count_ += chunk.size;
+  query_result_->chunks.push_back(std::move(chunk));
+  query_result_->is_heap = false;
 }
 
 void DictEntryIterator::Sort() {
-  if (ordered_mode_ || exhausted())
+  if (ordered_mode_ || exhausted() || query_result_->is_heap)
     return;
   auto& chunks = query_result_->chunks;
-  // partial-sort remaining chunks, move best match to chunk_index_
-  std::partial_sort(chunks.begin() + chunk_index_,
-                    chunks.begin() + chunk_index_ + 1, chunks.end(),
-                    dictionary::compare_chunk_by_head_element);
+  std::make_heap(chunks.begin() + chunk_index_, chunks.end(),
+                 dictionary::chunk_visited_later);
+  query_result_->is_heap = true;
 }
 
 std::map<Code, double> DictEntryIterator::TopWeightsByCode(
@@ -259,8 +297,6 @@ std::map<Code, double> DictEntryIterator::TopWeightsByCode(
 
 DictEntryIterator DictEntryIterator::Fork() const {
   DictEntryIterator copy(*this);
-  // The implicit copy shares QueryResult and would mutate live chunk cursors.
-  copy.query_result_ = New<dictionary::QueryResult>(*query_result_);
   copy.entry_.reset();
   return copy;
 }
@@ -390,18 +426,28 @@ bool DictEntryIterator::FindNextEntry() {
   if (exhausted()) {
     return false;
   }
-  auto& chunk = query_result_->chunks[chunk_index_];
+  auto& chunks = query_result_->chunks;
+  if (!query_result_->is_heap) {
+    auto& chunk = chunks[chunk_index_];
+    ++chunk.cursor;
+    chunk.SkipNonMatchingAuxiliary();
+    if (chunk.cursor >= chunk.size)
+      ++chunk_index_;
+    if (exhausted())
+      return false;
+    Sort();
+    return true;
+  }
+  auto first = chunks.begin() + chunk_index_;
+  std::pop_heap(first, chunks.end(), dictionary::chunk_visited_later);
+  auto& chunk = chunks.back();
   ++chunk.cursor;
   chunk.SkipNonMatchingAuxiliary();
-  if (chunk.cursor >= chunk.size) {
-    ++chunk_index_;
-  }
-  if (exhausted()) {
-    return false;
-  }
-  // reorder chunks to move the one with the best entry to head
-  Sort();
-  return true;
+  if (chunk.cursor < chunk.size)
+    std::push_heap(first, chunks.end(), dictionary::chunk_visited_later);
+  else
+    chunks.pop_back();
+  return !exhausted();
 }
 
 bool DictEntryIterator::Next() {
@@ -416,20 +462,31 @@ bool DictEntryIterator::Next() {
 
 // Note: does not apply filters
 bool DictEntryIterator::Skip(size_t num_entries) {
+  if (num_entries == 0)
+    return true;
+  entry_.reset();
   if (ordered_mode_) {
-    if (ordered_index_ + num_entries > ordered_entries_.size()) {
+    if (num_entries > ordered_entries_.size() - ordered_index_) {
       ordered_index_ = ordered_entries_.size();
       return false;
     }
     ordered_index_ += num_entries;
-    entry_.reset();
     return true;
   }
+  query_result_->is_heap = false;
   while (num_entries > 0) {
     if (exhausted())
       return false;
     auto& chunk = query_result_->chunks[chunk_index_];
-    if (chunk.cursor + num_entries < chunk.size) {
+    if (chunk.auxiliary_path) {
+      ++chunk.cursor;
+      chunk.SkipNonMatchingAuxiliary();
+      if (chunk.cursor >= chunk.size)
+        ++chunk_index_;
+      --num_entries;
+      continue;
+    }
+    if (num_entries < chunk.size - chunk.cursor) {
       chunk.cursor += num_entries;
       return true;
     }
