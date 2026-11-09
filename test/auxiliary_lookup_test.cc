@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <rime/config.h>
@@ -407,4 +408,53 @@ TEST_F(RimeAuxiliaryLookupTest, UserDictionaryFiltersTheChosenAuxiliaryPath) {
     EXPECT_EQ("你", prefix->second.Peek()->text);
     ASSERT_TRUE(db->Close());
   }
+}
+
+TEST_F(RimeAuxiliaryLookupTest,
+       SharedInputTypesCompileSelectedNineColumnAuxiliary) {
+  database_.reset();
+  std::remove("aux_path_test.aux.bin");
+  std::remove("aux_path_other.aux.bin");
+  std::ofstream("aux_path_test_aux.yaml") << "你\trx,ab,cd,ef,gh,ij,kl,mn,op\n";
+  Config schema;
+  ASSERT_TRUE(schema.LoadFromFile(path{"aux_path_test.schema.yaml"}));
+  Config selection;
+  std::istringstream data(R"YAML(input_types:
+  enabled: [pinyin]
+  options: [{option: pinyin}]
+lookup:
+  dictionary: aux_path_test
+  aux: aux_path_test
+algebra:
+  aux_path_test:
+    - "aux|^([a-z])([a-z])(?:,[^,]*){8}$|$1|"
+    - "aux|^([a-z])([a-z])(?:,[^,]*){8}$|$1$2|abbrev"
+    - "aux|^([a-z])([a-z])(?:,[^,]*){8}$|$1$2/|"
+  aux_path_other:
+    - "aux|^[^,]*,([a-z])([a-z])(?:,[^,]*){7}$|$1$2|"
+)YAML");
+  ASSERT_TRUE(selection.LoadFromStream(data));
+  schema.SetItem("input_types", selection.GetItem("input_types"));
+  schema.SetItem("lookup", selection.GetItem("lookup"));
+  schema.SetItem("build/auxiliary/algebra", selection.GetItem("algebra"));
+  ASSERT_TRUE(schema.SaveToFile(path{"aux_path_test.schema.yaml"}));
+  ASSERT_TRUE(
+      DictCompiler::CompileAuxiliary(path{"aux_path_test.schema.yaml"}));
+  EXPECT_FALSE(std::filesystem::exists("aux_path_other.aux.bin"));
+  AuxiliaryDb database(path{"aux_path_test.aux.bin"});
+  ASSERT_TRUE(database.Load());
+  vector<AuxiliaryCharacter> characters;
+  ASSERT_TRUE(database.Lookup("r", &characters));
+  ASSERT_EQ(1u, characters.size());
+  EXPECT_EQ("你", characters.front().text);
+  EXPECT_EQ(kNormalSpelling, characters.front().type);
+  characters.clear();
+  ASSERT_TRUE(database.Lookup("rx", &characters));
+  EXPECT_EQ(kAbbreviation, characters.front().type);
+  characters.clear();
+  ASSERT_TRUE(database.Lookup("rx/", &characters));
+  EXPECT_EQ(kNormalSpelling, characters.front().type);
+  vector<AuxiliaryCode> codes;
+  ASSERT_TRUE(database.ReverseLookup("你", &codes));
+  EXPECT_EQ(3u, codes.size());
 }

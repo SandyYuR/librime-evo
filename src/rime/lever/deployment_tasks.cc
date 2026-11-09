@@ -275,8 +275,12 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
         return;
       }
     }
-    if (!schema_config->IsNull("build/auxiliary/dictionary") ||
-        !schema_config->IsNull("build/auxiliary/algebra")) {
+    vector<pair<string, an<ConfigList>>> auxiliary;
+    if (!DictCompiler::ReadAuxiliarySpecs(schema_config.get(), &auxiliary)) {
+      ++failure;
+      return;
+    }
+    if (!auxiliary.empty()) {
       string source;
       schema_config->GetString("build/auxiliary/dictionary", &source);
       CompileUnit unit(schema_id + ":auxiliary",
@@ -284,13 +288,9 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
                        [compiled_schema]() {
                          return DictCompiler::CompileAuxiliary(compiled_schema);
                        });
-      if (auto groups = schema_config->GetMap("build/auxiliary/algebra")) {
-        for (const auto& group : *groups)
-          unit.AddOutput(
-              path(group.first + ".aux.bin").filename().to_utf8_string());
-      } else {
-        unit.AddOutput("auto.aux.bin");
-      }
+      for (const auto& group : auxiliary)
+        unit.AddOutput(
+            path(group.first + ".aux.bin").filename().to_utf8_string());
       if (!add_unit(std::move(unit))) {
         ++failure;
         return;

@@ -52,6 +52,9 @@ class DictCompiler {
   RIME_DLL static bool CompileDictionary(const DictionarySpec& definition,
                                          const path& schema_file,
                                          int options = 0);
+  RIME_DLL static bool ReadAuxiliarySpecs(
+      Config* schema,
+      vector<pair<string, an<ConfigList>>>* groups);
   RIME_DLL static bool CompileAuxiliary(const path& schema_file);
   void set_options(int options) { options_ = options; }
 

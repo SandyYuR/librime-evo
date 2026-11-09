@@ -11,6 +11,7 @@
 #include <rime/context.h>
 #include <rime/config/config_types.h>
 #include <rime/engine.h>
+#include <rime/dict/prism_config.h>
 #include <rime/filter.h>
 #include <rime/formatter.h>
 #include <rime/key_event.h>
@@ -123,8 +124,8 @@ class ConcreteEngine : public Engine {
   vector<of<Formatter>> formatters_;
   vector<of<Processor>> post_processors_;
   an<Switcher> switcher_;
-  vector<string> input_type_options_;
-  string input_type_reset_;
+  InputTypesConfig input_types_;
+  bool input_types_valid_ = true;
   bool enforcing_input_type_ = false;
 };
 
@@ -225,50 +226,28 @@ void ConcreteEngine::OnOptionUpdate(Context* ctx, const string& option) {
 }
 
 void ConcreteEngine::LoadInputTypes() {
-  input_type_options_.clear();
-  input_type_reset_.clear();
-  Config* config = schema_->config();
-  if (!config)
-    return;
-
-  auto input_type_item = config->GetItem("input_types");
-  auto input_types = As<ConfigMap>(input_type_item);
-  auto options = As<ConfigList>(input_type_item);
-  if (input_types)
-    options = As<ConfigList>(input_types->Get("options"));
-  if (!options)
-    return;
-  for (const auto& item : *options) {
-    auto option_map = As<ConfigMap>(item);
-    if (!option_map)
-      continue;
-    string option;
-    auto option_value = option_map->GetValue("option");
-    if (!option_value || !option_value->GetString(&option) || option.empty())
-      continue;
-    if (std::find(input_type_options_.begin(), input_type_options_.end(),
-                  option) == input_type_options_.end()) {
-      input_type_options_.push_back(std::move(option));
-    }
-  }
-  if (input_types) {
-    if (auto reset = input_types->GetValue("reset"))
-      reset->GetString(&input_type_reset_);
-  }
+  input_types_valid_ = input_types_.Load(schema_->config());
 }
 
 void ConcreteEngine::EnforceInputTypeOption(Context* ctx,
                                             const string& option) {
-  if (enforcing_input_type_ || !ctx || !ctx->get_option(option))
+  if (enforcing_input_type_ || !ctx || !input_types_.Contains(option))
     return;
-  if (std::find(input_type_options_.begin(), input_type_options_.end(),
-                option) == input_type_options_.end())
-    return;
-
   enforcing_input_type_ = true;
-  for (const auto& other : input_type_options_) {
-    if (other != option && ctx->get_option(other))
-      ctx->set_option(other, false);
+  if (!input_types_valid_ || !input_types_.IsEnabled(option)) {
+    if (ctx->get_option(option))
+      ctx->set_option(option, false);
+  } else if (ctx->get_option(option)) {
+    for (const auto& other : input_types_.options) {
+      if (other.option != option && ctx->get_option(other.option))
+        ctx->set_option(other.option, false);
+    }
+  } else {
+    bool active = false;
+    for (const auto& other : input_types_.enabled)
+      active = active || ctx->get_option(other.option);
+    if (!active)
+      ctx->set_option(option, true);
   }
   enforcing_input_type_ = false;
 }
@@ -671,20 +650,19 @@ void ConcreteEngine::InitializeComponents() {
 void ConcreteEngine::InitializeOptions() {
   LOG(INFO) << "ConcreteEngine::InitializeOptions";
   LoadInputTypes();
-  if (!input_type_options_.empty()) {
-    for (const auto& option : input_type_options_)
-      context_->set_option(option, false);
-    string reset = input_type_reset_;
-    if (std::find(input_type_options_.begin(), input_type_options_.end(),
-                  reset) == input_type_options_.end()) {
-      reset = input_type_options_.front();
-    }
-    context_->set_option(reset, true);
-  }
+  const string initial = input_types_valid_
+                             ? input_types_.InitialOption(context_.get())
+                             : string();
+  enforcing_input_type_ = true;
+  for (const auto& item : input_types_.options)
+    context_->set_option(item.option, item.option == initial);
+  enforcing_input_type_ = false;
   // reset custom switches
   Config* config = schema_->config();
   Switches switches(config);
   switches.FindOption([this](Switches::SwitchOption option) {
+    if (input_types_.Contains(option.option_name))
+      return Switches::kContinue;
     LOG(INFO) << "found switch option: " << option.option_name
               << ", reset: " << option.reset_value;
     if (option.reset_value >= 0) {

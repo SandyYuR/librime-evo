@@ -9,6 +9,7 @@
 #include <rime/common.h>
 #include <rime/dict/dictionary.h>
 #include <rime/dict/prism_config.h>
+#include <rime/engine.h>
 #include <rime/resource.h>
 #include <rime/schema.h>
 #include <rime/service.h>
@@ -775,7 +776,7 @@ Dictionary* DictionaryComponent::Create(const Ticket& ticket) {
     return nullptr;
   Config* config = ticket.schema->config();
   PrismConfig prism_config;
-  if (!prism_config.Load(config->GetMap(ticket.name_space), ticket.name_space))
+  if (!prism_config.Load(config, ticket.name_space))
     return nullptr;
   string dict_name;
   if (!config->GetString(ticket.name_space + "/dictionary", &dict_name)) {
@@ -787,8 +788,20 @@ Dictionary* DictionaryComponent::Create(const Ticket& ticket) {
     return nullptr;  // not requiring static dictionary
   }
   string prism_name = prism_config.name;
-  if (!prism_config.selections.empty())
+  if (!prism_config.selections.empty()) {
     prism_name = prism_config.selections.front().name;
+    if (prism_config.follows_input_types) {
+      InputTypesConfig types;
+      if (!types.Load(config))
+        return nullptr;
+      const string initial = types.InitialOption(
+          ticket.engine ? ticket.engine->context() : nullptr);
+      for (const auto& selection : prism_config.selections) {
+        if (selection.option == initial)
+          prism_name = selection.name;
+      }
+    }
+  }
   const bool default_prism = prism_name.empty();
   if (default_prism) {
     prism_name = dict_name;
