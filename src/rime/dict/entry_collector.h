@@ -9,6 +9,11 @@
 
 #include <queue>
 #include <functional>
+#include <string_view>
+#include <boost/version.hpp>
+#if BOOST_VERSION >= 108100
+#include <boost/unordered/unordered_flat_map.hpp>
+#endif
 #include <rime/common.h>
 #include <rime/algo/encoder.h>
 #include <rime/dict/dictionary.h>
@@ -19,15 +24,29 @@ namespace rime {
 struct RawDictEntry {
   RawCode raw_code;
   string text;
-  double weight;
+  double weight = 0.0;
 };
 
-// code -> weight
-using WeightMap = map<string, double>;
-// word -> [ { code, weight } ]
 // For the sake of memory usage, don't use word -> { code -> weight } as there
-// may be many words, but may not be many representations for a word
-using WordMap = hash_map<string, vector<pair<string, double>>>;
+// may be many words, but may not be many alternative encodings for a word.
+// The first encoding is stored inline to avoid one heap allocation per word;
+// alternative encodings are rare.
+struct WordEntries {
+  bool has_encoding = false;
+  string code;
+  double weight = 0.0;
+  vector<pair<string, double>> alternative_encodings;
+};
+
+#if BOOST_VERSION >= 108100
+template <class K, class V>
+using WordHashMap = boost::unordered_flat_map<K, V>;
+#else
+template <class K, class V>
+using WordHashMap = hash_map<K, V>;
+#endif
+
+using WordMap = WordHashMap<string, WordEntries>;
 // [ (word, weight), ... ]
 using EncodeQueue = std::queue<pair<string, string>>;
 
@@ -38,7 +57,7 @@ class EntryCollector : public PhraseCollector {
  public:
   Syllabary syllabary;
   bool build_syllabary = true;
-  vector<of<RawDictEntry>> entries;
+  vector<RawDictEntry> entries;
   size_t num_entries = 0;
   ReverseLookupTable stems;
 
@@ -77,9 +96,12 @@ class EntryCollector : public PhraseCollector {
   set<string /* word */> collection;
   std::function<string(const string&)> fallback_lookup;
   WordMap words;
-  WeightMap total_weight;
 
  private:
+  void CreateEntryImpl(std::string_view word,
+                       std::string_view code_str,
+                       std::string_view weight_str);
+
   bool include_preset_phrases = true;
   map<string, string> fallback_codes_;
   string current_dict_file;
