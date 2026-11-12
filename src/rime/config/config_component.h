@@ -34,6 +34,10 @@ class Config : public Class<Config, const string&>, public ConfigItemRef {
   bool SaveToStream(std::ostream& stream);
   RIME_DLL bool LoadFromFile(const path& file_path);
   RIME_DLL bool SaveToFile(const path& file_path);
+  // ConfigBuilder may return partially resolved data after a failed build.
+  // Only this result confirms loading, linking and all output plugins
+  // succeeded.
+  RIME_DLL bool IsBuildSuccessful() const;
 
   // access a tree node of a particular type with "path/to/node"
   RIME_DLL bool IsNull(const string& path);

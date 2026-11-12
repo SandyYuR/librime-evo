@@ -179,7 +179,8 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
   {
     the<DeploymentTask> t;
     t.reset(new ConfigFileUpdate("default.yaml", "config_version"));
-    t->Run(deployer);
+    if (!t->Run(deployer))
+      return false;
     // Deprecated: symbols.yaml is only used as source file
     // t.reset(new ConfigFileUpdate("symbols.yaml", "config_version"));
     // t->Run(deployer);
@@ -544,6 +545,10 @@ bool ConfigFileUpdate::Run(Deployer* deployer) {
       return false;
     }
     config.reset(Config::Require("config_builder")->Create(file_name_));
+    if (!config || !config->IsBuildSuccessful()) {
+      LOG(ERROR) << "failed to build config file: " << file_name_;
+      return false;
+    }
   }
   return true;
 }

@@ -40,6 +40,8 @@ class ConfigData {
   bool modified() const { return modified_; }
   void set_modified() { modified_ = true; }
   void set_auto_save(bool auto_save) { auto_save_ = auto_save; }
+  bool build_successful() const { return build_successful_; }
+  void set_build_successful(bool successful) { build_successful_ = successful; }
 
   an<ConfigItem> root;
 
@@ -47,6 +49,9 @@ class ConfigData {
   path file_path_;
   bool modified_ = false;
   bool auto_save_ = false;
+  // This result belongs to the current in-memory compilation, never a previous
+  // artifact or source-supplied __build_info. Partial data remains readable.
+  bool build_successful_ = false;
 };
 
 }  // namespace rime
