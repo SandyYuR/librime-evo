@@ -1,0 +1,58 @@
+diff --git a/data/CMakeLists.txt b/data/CMakeLists.txt
+--- a/data/CMakeLists.txt
++++ b/data/CMakeLists.txt
+@@ -210,7 +210,9 @@
+     FILES
+       ${DICT_GENERATED_DIR}/${DICT}.ocd2
+     DESTINATION
+-      ${DIR_SHARE_OPENCC}
++      data
++    COMPONENT
++      data
+   )
+   endif()
+
+@@ -219,7 +221,9 @@
+     FILES
+       ${DICT_GENERATED_DIR}/${DICT}.txt
+     DESTINATION
+-      ${DIR_SHARE_OPENCC}
++      data
++    COMPONENT
++      data
+   )
+   endif()
+
+@@ -254,7 +258,9 @@
+       FILES
+         ${DICT_GENERATED_DIR}/${DICT}.ocd
+       DESTINATION
+-        ${DIR_SHARE_OPENCC}
++        data
++    COMPONENT
++      data
+     )
+     endif()
+
+@@ -326,7 +332,9 @@
+     FILES
+       ${CONFIG_CONVERTED_FILES}
+     DESTINATION
+-      ${DIR_SHARE_OPENCC}
++      data
++    COMPONENT
++      data
+   )
+   endif()
+ else()
+@@ -335,7 +343,9 @@
+     FILES
+       ${CONFIG_FILES}
+     DESTINATION
+-      ${DIR_SHARE_OPENCC}
++      data
++    COMPONENT
++      data
+   )
+   endif()
+ endif()

@@ -1,0 +1,12 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -6,6 +6,8 @@ list(REMOVE_ITEM predict_src src/predict_data_tool.cc)
+ list(REMOVE_ITEM predict_src predict_data_tool.cc)
+
+ add_library(rime-predict-objs OBJECT ${predict_src})
++target_compile_options(rime-predict-objs PRIVATE "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=.")
++target_compile_definitions(rime-predict-objs PRIVATE BOOST_ALL_NO_EMBEDDED_GDB_SCRIPTS)
+ if(BUILD_SHARED_LIBS)
+   set_target_properties(rime-predict-objs
+     PROPERTIES

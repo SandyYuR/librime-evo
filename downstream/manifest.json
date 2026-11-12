@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/SandyYuR/librime-evo",
+  "maintenance_branch": "main",
+  "upstream_repository": "https://github.com/amzxyz/librime-evo",
+  "upstream_commit": "8727992e067de6d1ee77135646fdabff67a9cd5b"
+}

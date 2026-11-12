@@ -88,6 +88,14 @@ make
 sudo make install
 ```
 
+Android ARM64 artifacts
+---
+The [Android ARM64 engine workflow](.github/workflows/android-engine.yml) builds two
+artifacts from the current commit and pinned source dependencies: a self-contained
+`arm64-v8a` engine DSO and an `org.rime.plugin.MANIFEST` provider APK. See the
+[Android build and verification guide](downstream/android/README.zh-CN.md) for artifact
+contents, checksums, signing behavior and local reproduction commands.
+
 Packaging status
 ---
 [![Packaging status](https://repology.org/badge/vertical-allrepos/librime.svg?columns=4&minversion=1.10.0)](https://repology.org/project/librime/versions)

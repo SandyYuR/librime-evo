@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "ndk": "28.0.13004108",
+  "cmake": "3.31.6",
+  "platform": 23,
+  "abis": [
+    "armeabi-v7a",
+    "arm64-v8a",
+    "x86",
+    "x86_64"
+  ],
+  "sources": {
+    "glog": {
+      "repository": "https://github.com/google/glog",
+      "commit": "7b134a5c82c0c0b5698bb6bf7a835b230c5638e4",
+      "url": "https://codeload.github.com/google/glog/tar.gz/7b134a5c82c0c0b5698bb6bf7a835b230c5638e4",
+      "patches": [
+        {
+          "file": "glog.patch",
+          "sha256": "598c1a85fdecd19afcdf0b7e5a7bc6f8a485146eb07f306df59fda44b07e1b2e"
+        }
+      ],
+      "sha256": "9c48c7c631be5af3502a19d06ebdb5c2f67d8d0bf216f896848089c1792e6193"
+    },
+    "leveldb": {
+      "repository": "https://github.com/google/leveldb",
+      "commit": "bb74ef739973a70ca9f0d90788a1da89b788c0ad",
+      "url": "https://codeload.github.com/google/leveldb/tar.gz/bb74ef739973a70ca9f0d90788a1da89b788c0ad",
+      "patches": [],
+      "sha256": "fa5cad533bef27fb0d693c10fe14b40c4b920813340d7c8aeccfa17c4fd2a73d"
+    },
+    "yaml-cpp": {
+      "repository": "https://github.com/jbeder/yaml-cpp",
+      "commit": "56e3bb550c91fd7005566f19c079cb7a503223cf",
+      "url": "https://codeload.github.com/jbeder/yaml-cpp/tar.gz/56e3bb550c91fd7005566f19c079cb7a503223cf",
+      "patches": [],
+      "sha256": "b8e01ea231a96d6984b0795f225281d1e9989f40ccd589568a051450f41e9151"
+    },
+    "marisa": {
+      "repository": "https://github.com/s-yata/marisa-trie",
+      "commit": "3e87d53b78e15f2f43783d5e376561a8c9722051",
+      "url": "https://codeload.github.com/s-yata/marisa-trie/tar.gz/3e87d53b78e15f2f43783d5e376561a8c9722051",
+      "patches": [
+        {
+          "file": "marisa-tire.patch",
+          "sha256": "ae33e4ab01e19abf11039934e8aaec1787cb4398a0d80014e125f3fb51e890c6"
+        }
+      ],
+      "sha256": "c24516edc43be8049ef4e23e50a574d4670036fe3595c49c0f01d4d87ce58f57"
+    },
+    "opencc": {
+      "repository": "https://github.com/BYVoid/OpenCC",
+      "commit": "025f371dc76b598d77384fbdab90c937471844d8",
+      "url": "https://codeload.github.com/BYVoid/OpenCC/tar.gz/025f371dc76b598d77384fbdab90c937471844d8",
+      "patches": [
+        {
+          "file": "opencc.patch",
+          "sha256": "6a9dc8ff989417be58c93d90f684f86b0f926ed27796a362cd478db4e91a1f0e"
+        },
+        {
+          "file": "opencc-host.patch",
+          "sha256": "ca447b50a70d0aff54b6009cb7f1e81a537a2a02256949dc0fdb80a7c9b430cb"
+        }
+      ],
+      "sha256": "8b27931630abab1136b7c3ee920e4a95e78cb84a3cab4670198172bc82104844",
+      "version": "1.4.2"
+    },
+    "librime-octagram": {
+      "repository": "https://github.com/lotem/librime-octagram",
+      "commit": "57d18b9f58e5284bd891d559f6bdd16cf60341e9",
+      "url": "https://codeload.github.com/lotem/librime-octagram/tar.gz/57d18b9f58e5284bd891d559f6bdd16cf60341e9",
+      "patches": [
+        {
+          "file": "librime-octagram.patch",
+          "sha256": "42b48b39ffd7d17839f4ce1d80618cc651b56a6fa67a5845eae14f3f4411febb"
+        }
+      ],
+      "sha256": "7b9c77bcf17566b64204791b72cdb1b4471e22efec5eef9b79ca764ab99a1576"
+    },
+    "librime-predict": {
+      "repository": "https://github.com/fxliang/librime-predict-leveldb",
+      "commit": "0c30981a7c178e62a94e02d611e866db66951bfe",
+      "url": "https://codeload.github.com/fxliang/librime-predict-leveldb/tar.gz/0c30981a7c178e62a94e02d611e866db66951bfe",
+      "patches": [
+        {
+          "file": "librime-predict.patch",
+          "sha256": "00e123841c753c167178e122c19f36b3513c6f7b0299a64690f1dffead9e7fe8"
+        }
+      ],
+      "sha256": "7f957dbd8182aa465b3b54154f88aefc41646ce4f08e198f2edd98e38f0ef951"
+    },
+    "boost": {
+      "version": "1.92.0",
+      "url": "https://github.com/boostorg/boost/releases/download/boost-1.92.0/boost-1.92.0-cmake.tar.xz",
+      "sha256": "9bed76128d4e46755dbe818487788c6fceb6f72b378f4daa49b7e1e600d9088d",
+      "patches": []
+    }
+  }
+}

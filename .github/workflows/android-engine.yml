@@ -1,0 +1,157 @@
+name: Android ARM64 engine
+
+on:
+  push:
+    branches: [main, 'build/android-engine-*']
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'plugins/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'LICENSE'
+      - 'downstream/manifest.json'
+      - 'downstream/android/**'
+      - '.github/workflows/android-engine.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'plugins/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'LICENSE'
+      - 'downstream/manifest.json'
+      - 'downstream/android/**'
+      - '.github/workflows/android-engine.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-engine-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      NDK_VERSION: '28.0.13004108'
+      CMAKE_VERSION: '3.31.6'
+      BUILD_TOOLS_VERSION: '36.1.0'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'ndk;28.0.13004108 cmake;3.31.6 build-tools;36.1.0 platforms;android-36'
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/rime-android-sources
+          key: rime-evo-android-sources-${{ hashFiles('downstream/android/sources.lock.json') }}
+
+      - name: Check bundled and pinned source contracts
+        run: python3 -m unittest discover -s downstream/android -p 'test_*.py' -v
+
+      - name: Build ARM64 engine and pinned dependencies
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/28.0.13004108
+          CMAKE_BIN: ${{ env.ANDROID_HOME }}/cmake/3.31.6/bin/cmake
+        run: python3 downstream/android/build.py --abi arm64-v8a --work build/android --jobs 2
+
+      - name: Link and verify the importable engine
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/28.0.13004108
+        run: |
+          python3 downstream/android/package_engine.py build/android/product \
+            --commit "$GITHUB_SHA" --abi arm64-v8a --output dist/android-engine/so
+
+      - name: Prepare APK signing identity
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_ENGINE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_ENGINE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_ENGINE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_ENGINE_KEY_PASSWORD }}
+        run: |
+          if [ "$GITHUB_REF" = refs/heads/main ] && [ "$GITHUB_EVENT_NAME" != pull_request ] && [ -n "$KEYSTORE_BASE64" ]; then
+            test -n "$RELEASE_STORE_PASSWORD" && test -n "$RELEASE_KEY_ALIAS" && test -n "$RELEASE_KEY_PASSWORD"
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/engine.jks"
+            echo 'channel=release' >> "$GITHUB_OUTPUT"
+          else
+            keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/engine.jks" \
+              -storepass android -alias androiddebugkey -keypass android \
+              -dname 'CN=librime-evo CI test,OU=Android engine,O=SandyYuR,C=CN' \
+              -keyalg RSA -keysize 3072 -validity 30
+            echo 'channel=test' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package and verify provider APK
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
+          KEYSTORE_FILE: ${{ runner.temp }}/engine.jks
+          RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_ENGINE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_ENGINE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_ENGINE_KEY_PASSWORD }}
+        run: |
+          if [ '${{ steps.signing.outputs.channel }}' = release ]; then
+            export KEYSTORE_PASSWORD="$RELEASE_STORE_PASSWORD"
+            export KEY_ALIAS="$RELEASE_KEY_ALIAS"
+            export KEY_PASSWORD="$RELEASE_KEY_PASSWORD"
+          else
+            export KEYSTORE_PASSWORD=android
+            export KEY_ALIAS=androiddebugkey
+            export KEY_PASSWORD=android
+          fi
+          engine="dist/android-engine/so/librime-evo-${GITHUB_SHA:0:8}-arm64-v8a.so"
+          test -f "$engine"
+          python3 downstream/android/package_plugin_apk.py \
+            --engine "$engine" \
+            --engine-manifest dist/android-engine/so/engine-manifest.json \
+            --output dist/android-engine/apk --channel '${{ steps.signing.outputs.channel }}'
+
+      - name: Publish checksums in the job summary
+        run: |
+          (cd dist/android-engine/so && sha256sum -c SHA256SUMS)
+          (cd dist/android-engine/apk && sha256sum -c SHA256SUMS)
+          {
+            echo '## Android ARM64 engine artifacts'
+            echo
+            echo '### Importable DSO'
+            echo '```text'
+            cat dist/android-engine/so/SHA256SUMS
+            echo '```'
+            echo
+            echo '### Provider APK'
+            echo '```text'
+            cat dist/android-engine/apk/SHA256SUMS
+            echo '```'
+            echo
+            echo "APK channel: ${{ steps.signing.outputs.channel }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: librime-evo-arm64-so-${{ github.sha }}
+          path: dist/android-engine/so/**
+          if-no-files-found: error
+          retention-days: 90
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: librime-evo-arm64-apk-${{ github.sha }}
+          path: dist/android-engine/apk/**
+          if-no-files-found: error
+          retention-days: 90
