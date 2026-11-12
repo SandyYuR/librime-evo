@@ -31,6 +31,7 @@ bool ConfigData::Save() {
 }
 
 bool ConfigData::LoadFromStream(std::istream& stream) {
+  build_successful_ = false;
   if (!stream.good()) {
     LOG(ERROR) << "failed to load config from stream.";
     return false;
@@ -62,6 +63,7 @@ bool ConfigData::SaveToStream(std::ostream& stream) {
 
 bool ConfigData::LoadFromFile(const path& file_path, ConfigCompiler* compiler) {
   // update status
+  build_successful_ = false;
   file_path_ = file_path;
   modified_ = false;
   root.reset();

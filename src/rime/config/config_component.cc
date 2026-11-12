@@ -43,6 +43,10 @@ bool Config::SaveToFile(const path& file_path) {
   return data_->SaveToFile(file_path);
 }
 
+bool Config::IsBuildSuccessful() const {
+  return data_->build_successful();
+}
+
 bool Config::IsNull(const string& path) {
   auto p = data_->Traverse(path);
   return !p || p->type() == ConfigItem::kNull;
@@ -246,7 +250,9 @@ an<ConfigData> ConfigBuilder::LoadConfig(ResourceResolver* resource_resolver,
   MultiplePlugins<decltype(plugins_)> multiple_plugins(plugins_);
   ConfigCompiler compiler(resource_resolver, &multiple_plugins);
   auto resource = compiler.Compile(config_id);
-  if (resource->loaded && !compiler.Link(resource)) {
+  const bool successful = resource->loaded && compiler.Link(resource);
+  resource->data->set_build_successful(successful);
+  if (resource->loaded && !successful) {
     LOG(ERROR) << "error building config: " << config_id;
   }
   return resource->data;
