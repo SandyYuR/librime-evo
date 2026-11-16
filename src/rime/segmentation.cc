@@ -16,10 +16,19 @@ static const char* kPartialSelectionTag = "partial";
 
 void Segment::Close() {
   auto cand = GetSelectedCandidate();
+  if (auxiliary_suffix &&
+      (!cand || cand->end() == auxiliary_suffix->trigger_start)) {
+    end = auxiliary_suffix->end;
+    return;
+  }
   if (cand && cand->end() < end) {
     // having selected a partially matched candidate, split it into 2 segments
     end = cand->end();
     tags.insert(kPartialSelectionTag);
+    if (auxiliary_suffix) {
+      auxiliary_suffix.reset();
+      tags.erase("auxiliary_suffix");
+    }
   }
 }
 
@@ -28,7 +37,11 @@ bool Segment::Reopen(size_t caret_pos) {
     return false;
   }
   const size_t original_end_pos = start + length;
-  if (original_end_pos == caret_pos) {
+  if (auxiliary_suffix)
+    end = auxiliary_suffix->trigger_start;
+  const size_t selection_end =
+      auxiliary_suffix ? auxiliary_suffix->end : original_end_pos;
+  if (selection_end == caret_pos) {
     // reuse previous candidates and keep selection
     if (end < original_end_pos) {
       // restore partial-selected segment
@@ -65,7 +78,9 @@ void Segmentation::Reset(const string& new_input) {
 
   // dispose segments that have changed
   int disposed = 0;
-  while (!empty() && back().end > diff_pos) {
+  while (!empty() &&
+         (back().end > diff_pos || (back().auxiliary_suffix &&
+                                    back().auxiliary_suffix->end > diff_pos))) {
     pop_back();
     ++disposed;
   }

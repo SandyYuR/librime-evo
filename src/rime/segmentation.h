@@ -7,6 +7,7 @@
 #ifndef RIME_SEGMENTATION_H_
 #define RIME_SEGMENTATION_H_
 
+#include <optional>
 #include <rime_api.h>
 #include <rime/common.h>
 
@@ -16,6 +17,12 @@ class Candidate;
 class Menu;
 
 struct Segment {
+  struct AuxiliarySuffix {
+    size_t trigger_start;
+    size_t code_start;
+    size_t end;
+  };
+
   enum Status {
     kVoid,
     kGuess,
@@ -30,6 +37,8 @@ struct Segment {
   an<Menu> menu;
   size_t selected_index = 0;
   string prompt;
+  // Boundaries of the trigger and parsed AUX code in the segmentation input.
+  std::optional<AuxiliarySuffix> auxiliary_suffix;
 
   Segment() = default;
 
@@ -42,6 +51,7 @@ struct Segment {
     menu.reset();
     selected_index = 0;
     prompt.clear();
+    auxiliary_suffix.reset();
   }
 
   void Close();

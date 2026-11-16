@@ -18,7 +18,7 @@ namespace {
 
 Schema MakeSchema(bool with_affix = false) {
   auto* config = new Config;
-  config->SetString("translator/aux_suffix", "`");
+  config->SetString("auxiliary_suffix_segmentor/trigger", "`");
   if (with_affix) {
     config->SetString("add_user_dict/prefix", "``");
     config->SetString("speller/alphabet", "abcdefghijklmnopqrstuvwxyz`");
@@ -46,6 +46,10 @@ TEST(AuxiliarySuffixSegmentorTest, KeepsSuffixOutOfMainSegment) {
   EXPECT_EQ(2U, segmentation[0].end);
   EXPECT_TRUE(segmentation[0].HasTag("abc"));
   EXPECT_TRUE(segmentation[0].HasTag("auxiliary_suffix"));
+  ASSERT_TRUE(segmentation[0].auxiliary_suffix);
+  EXPECT_EQ(2U, segmentation[0].auxiliary_suffix->trigger_start);
+  EXPECT_EQ(3U, segmentation[0].auxiliary_suffix->code_start);
+  EXPECT_EQ(4U, segmentation[0].auxiliary_suffix->end);
 
   EXPECT_TRUE(segmentation.Forward());
   EXPECT_FALSE(segmentor.Proceed(&segmentation));
@@ -87,9 +91,12 @@ TEST(AuxiliarySuffixSegmentorTest, ClearsSuffixStateAfterDeletion) {
 
   segmentation.Reset("ni");
   EXPECT_TRUE(segmentor.Proceed(&segmentation));
+  AbcSegmentor abc(Ticket(&schema, "abc_segmentor"));
+  EXPECT_TRUE(abc.Proceed(&segmentation));
   ASSERT_EQ(1U, segmentation.size());
   EXPECT_TRUE(segmentation[0].HasTag("abc"));
   EXPECT_FALSE(segmentation[0].HasTag("auxiliary_suffix"));
+  EXPECT_FALSE(segmentation[0].auxiliary_suffix);
 }
 
 TEST(AuxiliarySuffixSegmentorTest, AffixPrefixIsNotConsumedAsAuxiliary) {

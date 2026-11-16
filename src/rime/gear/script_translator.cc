@@ -146,7 +146,8 @@ class ScriptTranslation : public Translation {
                     size_t end_of_input,
                     int max_sentences,
                     double sentence_cutoff_threshold,
-                    const string& auxiliary_suffix)
+                    bool use_direct_aux,
+                    string auxiliary_suffix)
       : translator_(translator),
         poet_(poet),
         start_(start),
@@ -156,12 +157,11 @@ class ScriptTranslation : public Translation {
             corrector,
             input,
             start,
-            translator->auxiliary_enabled() ? translator->auxiliary_matcher()
-                                            : nullptr)),
+            use_direct_aux ? translator->auxiliary_matcher() : nullptr)),
         max_sentences_(max_sentences),
         sentence_cutoff_threshold_(sentence_cutoff_threshold),
         enable_correction_(corrector),
-        auxiliary_suffix_(auxiliary_suffix) {
+        auxiliary_suffix_(std::move(auxiliary_suffix)) {
     set_exhausted(true);
   }
   bool Evaluate(Dictionary* dict, UserDictionary* user_dict);
@@ -238,11 +238,9 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
         canonicalizer_ = std::move(canonicalizer);
       }
     }
-    auxiliary_mode_ = true;
-    config->GetBool(name_space_ + "/auxiliary_mode", &auxiliary_mode_);
     config->GetString(name_space_ + "/aux", &auxiliary_type_);
-    config->GetString(name_space_ + "/auxiliary_option", &auxiliary_option_);
-    config->GetString(name_space_ + "/aux_suffix", &auxiliary_suffix_trigger_);
+    config->GetBool(name_space_ + "/enable_direct_aux", &enable_direct_aux_);
+    config->GetString(name_space_ + "/direct_aux_option", &direct_aux_option_);
   }
   if (enable_correction_) {
     if (auto* corrector = Corrector::Require("corrector")) {
@@ -255,9 +253,9 @@ ScriptTranslator::~ScriptTranslator() = default;
 
 an<Translation> ScriptTranslator::Query(const string& input,
                                         const Segment& segment) {
-  if (!dict_ || !SelectPrism() || !dict_->loaded())
-    return nullptr;
-  if (!segment.HasAnyTagIn(tags_))
+  const auto& suffix = segment.auxiliary_suffix;
+  if (!segment.HasAnyTagIn(tags_) || (suffix && !SupportsAuxiliarySuffix()) ||
+      !dict_ || !SelectPrism() || !dict_->loaded())
     return nullptr;
 
   DLOG(INFO) << "input = '" << input << "', [" << segment.start << ", "
@@ -265,40 +263,32 @@ an<Translation> ScriptTranslator::Query(const string& input,
 
   FinishSession();
 
-  if (!auxiliary_db_ && !auxiliary_type_.empty()) {
-    const ResourceType resource_type = {"auxiliary_db", "", ".aux.bin"};
-    the<ResourceResolver> resolver(
-        Service::instance().CreateDeployedResourceResolver(resource_type));
-    auxiliary_db_ = the<AuxiliaryDb>(
-        new AuxiliaryDb(resolver->ResolvePath(auxiliary_type_)));
-    if (!auxiliary_db_->Load())
-      auxiliary_db_.reset();
-  }
-  if (!auxiliary_matcher_ && auxiliary_db_) {
-    auxiliary_matcher_ =
-        std::make_shared<AuxiliaryMatcher>(dict_.get(), auxiliary_db_.get());
-  }
-
+  auto* context = engine_->context();
   string auxiliary_suffix;
-  const string& full_input = engine_->context()->input();
-  if (segment.HasTag("auxiliary_suffix") &&
-      full_input.size() > segment.end + auxiliary_suffix_trigger_.size() &&
-      full_input.compare(segment.end, auxiliary_suffix_trigger_.size(),
-                         auxiliary_suffix_trigger_) == 0) {
-    auxiliary_suffix =
-        full_input.substr(segment.end + auxiliary_suffix_trigger_.size());
+  if (suffix) {
+    const auto& segmented_input = context->composition().input();
+    if (suffix->trigger_start != segment.end ||
+        suffix->trigger_start >= suffix->code_start ||
+        suffix->code_start > suffix->end ||
+        suffix->end > segmented_input.size())
+      return nullptr;
+    auxiliary_suffix = segmented_input.substr(suffix->code_start,
+                                              suffix->end - suffix->code_start);
+    if (!auxiliary_suffix.empty() && !LoadAuxiliaryMatcher())
+      return nullptr;
   }
+  const bool use_direct_aux =
+      DirectAuxiliaryEnabled() && LoadAuxiliaryMatcher();
 
   bool user_dict_available =
       user_dict_ && user_dict_->loaded() && !IsUserDictDisabledFor(input);
 
-  size_t end_of_input = auxiliary_suffix.empty()
-                            ? engine_->context()->input().length()
-                            : segment.end;
+  size_t end_of_input = suffix ? segment.end : context->input().length();
   // the translator should survive translations it creates
   auto result = New<ScriptTranslation>(
       this, corrector_.get(), poet_.get(), input, segment.start, end_of_input,
-      max_sentences_, sentence_cutoff_threshold_, auxiliary_suffix);
+      max_sentences_, sentence_cutoff_threshold_, use_direct_aux,
+      std::move(auxiliary_suffix));
   if (!result ||
       !result->Evaluate(dict_.get(),
                         user_dict_available ? user_dict_.get() : NULL)) {
@@ -325,12 +315,30 @@ bool ScriptTranslator::SelectPrism() {
   return true;
 }
 
-bool ScriptTranslator::auxiliary_enabled() const {
-  if (!auxiliary_matcher_ || !engine_)
+bool ScriptTranslator::DirectAuxiliaryEnabled() const {
+  return enable_direct_aux_ && !auxiliary_type_.empty() &&
+         (direct_aux_option_.empty() ||
+          engine_->context()->get_option(direct_aux_option_));
+}
+
+bool ScriptTranslator::LoadAuxiliaryMatcher() {
+  if (auxiliary_matcher_)
+    return true;
+  if (auxiliary_type_.empty())
     return false;
-  if (!auxiliary_option_.empty())
-    return engine_->context()->get_option(auxiliary_option_);
-  return auxiliary_mode_;
+  if (!auxiliary_db_) {
+    the<ResourceResolver> resolver(
+        Service::instance().CreateDeployedResourceResolver(
+            {"auxiliary_db", "", ".aux.bin"}));
+    auto database =
+        std::make_unique<AuxiliaryDb>(resolver->ResolvePath(auxiliary_type_));
+    if (!database->Load())
+      return false;
+    auxiliary_db_ = std::move(database);
+  }
+  auxiliary_matcher_ =
+      std::make_shared<AuxiliaryMatcher>(dict_.get(), auxiliary_db_.get());
+  return true;
 }
 
 int ScriptTranslator::core_word_length() const {

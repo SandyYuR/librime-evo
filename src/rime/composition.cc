@@ -39,11 +39,15 @@ Preedit Composition::GetPreedit(const string& full_input,
         end = cand->end();
         preedit.text += cand->text();
       } else {  // raw input
-        end = at(i).end;
+        const auto& segment = at(i);
+        end = segment.auxiliary_suffix ? segment.auxiliary_suffix->trigger_start
+                                       : segment.end;
         if (!at(i).HasTag("phony")) {
           preedit.text += input_.substr(start, end - start);
         }
       }
+      if (at(i).auxiliary_suffix && at(i).status >= Segment::kSelected)
+        end = at(i).end;
     } else {  // highlighted
       preedit.sel_start = preedit.text.length();
       preedit.sel_end = string::npos;
@@ -99,27 +103,34 @@ string Composition::GetPrompt() const {
   return empty() ? string() : back().prompt;
 }
 
+static void SkipAuxiliarySuffix(const Segment& segment,
+                                const string& input,
+                                size_t& end,
+                                string& result) {
+  if (const auto& suffix = segment.auxiliary_suffix) {
+    if (end < suffix->trigger_start)
+      result += input.substr(end, suffix->trigger_start - end);
+    end = suffix->end;
+  }
+}
+
 string Composition::GetCommitText() const {
   string result;
   size_t end = 0;
-  bool auxiliary_suffix = false;
   for (const Segment& seg : *this) {
     if (auto cand = seg.GetSelectedCandidate()) {
       end = cand->end();
       result += cand->text();
     } else {
-      end = seg.end;
+      end =
+          seg.auxiliary_suffix ? seg.auxiliary_suffix->trigger_start : seg.end;
       if (!seg.HasTag("phony")) {
-        result += input_.substr(seg.start, seg.end - seg.start);
+        result += input_.substr(seg.start, end - seg.start);
       }
     }
-    if (seg.HasTag("auxiliary_suffix")) {
-      auxiliary_suffix = true;
-      end = input_.length();
-      break;
-    }
+    SkipAuxiliarySuffix(seg, input_, end, result);
   }
-  if (!auxiliary_suffix && input_.length() > end) {
+  if (input_.length() > end) {
     result += input_.substr(end);
   }
   return result;
@@ -129,11 +140,12 @@ string Composition::GetScriptText(bool keep_selection) const {
   string result;
   size_t start = 0;
   size_t end = 0;
-  bool auxiliary_suffix = false;
   for (const Segment& seg : *this) {
     auto cand = seg.GetSelectedCandidate();
     start = end;
-    end = cand ? cand->end() : seg.end;
+    end = cand                   ? cand->end()
+          : seg.auxiliary_suffix ? seg.auxiliary_suffix->trigger_start
+                                 : seg.end;
     if (keep_selection && cand && !cand->text().empty() &&
         seg.status >= Segment::kSelected)
       result += cand->text();
@@ -141,13 +153,9 @@ string Composition::GetScriptText(bool keep_selection) const {
       result += boost::erase_first_copy(cand->preedit(), "\t");
     else if (!seg.HasTag("phony"))
       result += input_.substr(start, end - start);
-    if (seg.HasTag("auxiliary_suffix")) {
-      auxiliary_suffix = true;
-      end = input_.length();
-      break;
-    }
+    SkipAuxiliarySuffix(seg, input_, end, result);
   }
-  if (!auxiliary_suffix && input_.length() > end) {
+  if (input_.length() > end) {
     result += input_.substr(end);
   }
   return result;

@@ -35,6 +35,9 @@ class ScriptTranslator : public Translator,
 
   virtual an<Translation> Query(const string& input,
                                 const Segment& segment) override;
+  bool SupportsAuxiliarySuffix() const override {
+    return !auxiliary_type_.empty();
+  }
   virtual bool Memorize(const CommitEntry& commit_entry) override;
   virtual bool ProcessSegmentOnCommit(CommitEntry& commit_entry,
                                       const Segment& seg) override;
@@ -58,7 +61,6 @@ class ScriptTranslator : public Translator,
   std::shared_ptr<AuxiliaryMatcher> auxiliary_matcher() const {
     return auxiliary_matcher_;
   }
-  bool auxiliary_enabled() const;
   int max_word_length() const { return max_word_length_; }
   int core_word_length() const;
   Projection* canonicalizer() const { return canonicalizer_.get(); }
@@ -75,12 +77,15 @@ class ScriptTranslator : public Translator,
   the<Corrector> corrector_;
   std::shared_ptr<AuxiliaryMatcher> auxiliary_matcher_;
   the<AuxiliaryDb> auxiliary_db_;
-  string auxiliary_suffix_trigger_ = "`";
   string auxiliary_type_;
-  bool auxiliary_mode_ = false;
-  string auxiliary_option_;
+  bool enable_direct_aux_ = false;
+  string direct_aux_option_;
   the<Poet> poet_;
   vector<an<Phrase>> queue_;
+
+ private:
+  bool DirectAuxiliaryEnabled() const;
+  bool LoadAuxiliaryMatcher();
 };
 
 }  // namespace rime

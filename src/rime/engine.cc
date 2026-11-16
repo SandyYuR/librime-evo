@@ -325,7 +325,8 @@ void ConcreteEngine::TranslateSegments(Segmentation* segments) {
     DLOG(INFO) << "translating segment: [" << input << "]";
     auto menu = New<Menu>();
     for (auto& entry : translators_) {
-      if (!entry.enabled)
+      if (!entry.enabled || (segment.auxiliary_suffix &&
+                             !entry.component->SupportsAuxiliarySuffix()))
         continue;
       auto translation = entry.component->Query(input, segment);
       if (!translation)

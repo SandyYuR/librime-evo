@@ -8,6 +8,11 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <rime/config.h>
+#include <rime/context.h>
+#include <rime/candidate.h>
+#include <rime/engine.h>
+#include <rime/schema.h>
+#include <rime/menu.h>
 #include <rime/algo/syllabifier.h>
 #include <rime/dict/auxiliary_db.h>
 #include <rime/dict/dict_compiler.h>
@@ -499,5 +504,125 @@ TEST_F(RimeAuxiliaryLookupTest,
     ASSERT_TRUE(original.Skip(1));
     EXPECT_EQ(vector<string>(expected.begin() + 1, expected.end()),
               drain(original));
+  }
+}
+
+TEST_F(RimeAuxiliaryLookupTest, EngineControlsDirectAndSuffixIndependently) {
+  for (bool direct : {false, true}) {
+    for (bool suffix : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "direct=" << direct << " suffix=" << suffix);
+      auto config = std::make_unique<Config>();
+      ASSERT_TRUE(config->LoadFromFile(path{"aux_path_test.schema.yaml"}));
+      std::istringstream settings(R"YAML(engine:
+  segmentors:
+    - {name: auxiliary_suffix_segmentor, when: suffix}
+    - abc_segmentor
+    - fallback_segmentor
+  translators:
+    - script_translator
+    - table_translator@plain
+    - echo_translator
+speller:
+  alphabet: "abcdefghijklmnopqrstuvwxyz:"
+  initials: abcdefghijklmnopqrstuvwxyz
+auxiliary_suffix_segmentor:
+  trigger: "::"
+translator:
+  dictionary: aux_path_test
+  prism: zrm
+  user_dict_mode: off
+  aux: aux_path_test
+  direct_aux_option: direct
+  enable_completion: false
+plain:
+  dictionary: aux_path_test
+  prism: zrm
+  user_dict_mode: off
+  enable_completion: false
+)YAML");
+      Config input;
+      ASSERT_TRUE(input.LoadFromStream(settings));
+      for (const string key :
+           {"engine", "speller", "auxiliary_suffix_segmentor", "translator",
+            "plain"})
+        ASSERT_TRUE(config->SetItem(key, input.GetItem(key)));
+      if (direct) {
+        ASSERT_TRUE(config->SetBool("translator/enable_direct_aux", true));
+      }
+      the<Engine> engine(Engine::Create());
+      engine->ApplySchema(new Schema("aux_controls_test", config.release()));
+      auto* context = engine->context();
+      auto query = [&](const string& raw) {
+        context->Clear();
+        context->set_input(raw);
+        vector<pair<string, size_t>> entries;
+        if (context->composition().empty())
+          return entries;
+        auto menu = context->composition().back().menu;
+        if (!menu)
+          return entries;
+        const auto count = menu->Prepare(20);
+        for (size_t i = 0; i < count; ++i) {
+          auto candidate = menu->GetCandidateAt(i);
+          if (candidate)
+            entries.emplace_back(candidate->text(), candidate->end());
+        }
+        return entries;
+      };
+
+      context->set_option("direct", true);
+      context->set_option("suffix", suffix);
+      const auto direct_hit = std::make_pair(string("逆"), size_t{3});
+      const auto direct_candidates = query("niz");
+      EXPECT_EQ(direct,
+                std::find(direct_candidates.begin(), direct_candidates.end(),
+                          direct_hit) != direct_candidates.end());
+      context->set_option("direct", false);
+      const auto without_direct = query("niz");
+      EXPECT_EQ(
+          without_direct.end(),
+          std::find(without_direct.begin(), without_direct.end(), direct_hit));
+
+      const auto suffix_candidates = query("ni::z");
+      ASSERT_FALSE(context->composition().empty());
+      EXPECT_EQ(suffix,
+                context->composition().back().auxiliary_suffix.has_value());
+      if (!suffix)
+        continue;
+
+      const vector<pair<string, size_t>> expected{{"逆", 2}};
+      EXPECT_EQ(expected, suffix_candidates);
+      context->set_caret_pos(4);  // the code after the caret is inactive
+      auto before_code = context->GetSelectedCandidate();
+      ASSERT_TRUE(before_code);
+      EXPECT_EQ("你", before_code->text());
+      context->set_caret_pos(5);
+      auto with_code = context->GetSelectedCandidate();
+      ASSERT_TRUE(with_code);
+      EXPECT_EQ("逆", with_code->text());
+      ASSERT_TRUE(context->PopInput());
+      auto pending = context->GetSelectedCandidate();
+      ASSERT_TRUE(pending);
+      EXPECT_EQ("你", pending->text());
+      ASSERT_TRUE(context->PopInput(2));
+      EXPECT_FALSE(context->composition().back().auxiliary_suffix);
+
+      EXPECT_TRUE(query("ni::qq").empty());
+      EXPECT_EQ(expected, query("ni::z"));
+      ASSERT_TRUE(context->ConfirmCurrentSelection());
+      EXPECT_EQ(5u, context->composition().GetConfirmedPosition());
+      EXPECT_FALSE(context->HasMenu());
+      EXPECT_EQ("逆", context->GetCommitText());
+      ASSERT_TRUE(context->ReopenPreviousSegment());
+      EXPECT_EQ(2u, context->composition().back().end);
+      ASSERT_TRUE(context->GetSelectedCandidate());
+      EXPECT_EQ("逆", context->GetSelectedCandidate()->text());
+      ASSERT_TRUE(context->ConfirmCurrentSelection());
+      ASSERT_TRUE(context->PushInput("hk"));
+      EXPECT_EQ("逆好", context->GetCommitText());
+      EXPECT_TRUE(context->Commit());
+      EXPECT_EQ(string::npos, context->commit_history().repr().find("::z"));
+    }
   }
 }

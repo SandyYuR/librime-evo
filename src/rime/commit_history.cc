@@ -49,8 +49,16 @@ void CommitHistory::Push(const Composition& composition, const string& input) {
       end = cand->end();
     } else {
       // no translation for the segment
-      Push({"raw", input.substr(seg.start, seg.end - seg.start)});
-      end = seg.end;
+      end =
+          seg.auxiliary_suffix ? seg.auxiliary_suffix->trigger_start : seg.end;
+      Push({"raw", input.substr(seg.start, end - seg.start)});
+    }
+    if (const auto& suffix = seg.auxiliary_suffix) {
+      if (end < suffix->trigger_start) {
+        Push({"raw", input.substr(end, suffix->trigger_start - end)});
+        last = nullptr;
+      }
+      end = suffix->end;
     }
   }
   if (input.length() > end) {

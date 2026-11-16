@@ -11,43 +11,21 @@ namespace rime {
 
 namespace {
 
-static void ClearAuxiliarySuffixState(Segmentation* segmentation) {
-  if (!segmentation)
-    return;
-  for (auto& segment : *segmentation) {
-    if (segment.HasTag("auxiliary_suffix")) {
-      segment.tags.erase("auxiliary_suffix");
-      segment.status = Segment::kVoid;
-      segment.menu.reset();
-      segment.selected_index = 0;
-    }
-  }
-}
-
-static void InvalidateMainSegment(Segmentation* segmentation, size_t marker) {
-  if (!segmentation)
-    return;
-  for (auto& segment : *segmentation) {
-    if (segment.start < marker && segment.end == marker) {
-      segment.tags.insert("auxiliary_suffix");
-      segment.status = Segment::kVoid;
-      segment.menu.reset();
-      segment.selected_index = 0;
-    }
-  }
+static bool CanTakeAuxiliarySuffix(const Segment& segment, size_t marker) {
+  return segment.start < marker && segment.end == marker &&
+         (segment.HasTag("abc") || segment.auxiliary_suffix);
 }
 
 }  // namespace
 
 AuxiliarySuffixSegmentor::AuxiliarySuffixSegmentor(const Ticket& ticket)
     : Segmentor(ticket) {
+  if (name_space_ == "segmentor")
+    name_space_ = "auxiliary_suffix_segmentor";
   if (!ticket.schema)
     return;
-  if (Config* config = ticket.schema->config()) {
+  if (Config* config = ticket.schema->config())
     config->GetString(name_space_ + "/trigger", &trigger_);
-    if (name_space_ == "auxiliary_suffix_segmentor")
-      config->GetString("translator/aux_suffix", &trigger_);
-  }
 }
 
 bool AuxiliarySuffixSegmentor::Proceed(Segmentation* segmentation) {
@@ -58,9 +36,8 @@ bool AuxiliarySuffixSegmentor::Proceed(Segmentation* segmentation) {
   const size_t marker = input.find(trigger_, start);
   // 只有以小写字母开头、且触发符位于编码之后的输入才可能有 AUX 后缀。
   // 使用完整输入判断：分段推进后 start 可能已经等于 marker。
-  if (marker == string::npos || marker == 0 || input.empty() ||
-      input.front() < 'a' || input.front() > 'z') {
-    ClearAuxiliarySuffixState(segmentation);
+  if (marker == string::npos || marker == 0 || input.front() < 'a' ||
+      input.front() > 'z') {
     return true;
   }
 
@@ -68,23 +45,31 @@ bool AuxiliarySuffixSegmentor::Proceed(Segmentation* segmentation) {
   // belongs to the preceding segment, so remove that placeholder first; this
   // lets the preceding segment become the active segment again and receive a
   // fresh filtered menu.
-  if (marker == start && !segmentation->empty() &&
-      segmentation->back().start == segmentation->back().end &&
-      segmentation->back().start == marker) {
+  if (marker == start) {
+    if (segmentation->size() < 2 || segmentation->back().end != marker ||
+        !CanTakeAuxiliarySuffix((*segmentation)[segmentation->size() - 2],
+                                marker))
+      return true;
     segmentation->Trim();
+  } else {
+    const size_t end = segmentation->GetCurrentEndPosition();
+    if (end > start && !segmentation->back().HasTag("abc") &&
+        !segmentation->back().auxiliary_suffix)
+      return true;
+    if (end > marker)
+      return true;
+    if (end < marker)
+      segmentation->AddSegment(Segment(start, marker));
   }
-  InvalidateMainSegment(segmentation, marker);
-  if (marker > start) {
-    Segment segment(start, marker);
-    segment.tags.insert("abc");
-    segment.tags.insert("auxiliary_suffix");
-    segmentation->AddSegment(segment);
-  }
-  if (marker + trigger_.size() >= input.size()) {
-    // Keep the trigger out of abc_segmentor until an AUX character follows.
-    return false;
-  }
-  // The suffix is an input constraint, not a separate translatable segment.
+
+  auto& segment = segmentation->back();
+  segment.auxiliary_suffix =
+      Segment::AuxiliarySuffix{marker, marker + trigger_.size(), input.size()};
+  segment.tags.insert("abc");
+  segment.tags.insert("auxiliary_suffix");
+  segment.status = Segment::kVoid;
+  segment.menu.reset();
+  segment.selected_index = 0;
   return false;
 }
 

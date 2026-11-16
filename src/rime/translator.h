@@ -28,6 +28,9 @@ class Translator : public Class<Translator, const Ticket&> {
   virtual an<Translation> Query(const string& input,
                                 const Segment& segment) = 0;
 
+  // Only translators that can apply the suffix may provide candidates for it.
+  virtual bool SupportsAuxiliarySuffix() const { return false; }
+
   string name_space() const { return name_space_; }
 
  protected:
