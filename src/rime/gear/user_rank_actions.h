@@ -7,7 +7,7 @@ namespace rime {
 class Context;
 class Engine;
 namespace user_rank {
-enum class EditAction { kMoveUp, kMoveDown, kResetAuto, kResetManual };
+enum class EditAction { kMoveUp, kMoveDown, kResetManual };
 bool ApplyEditAction(Engine* engine, Context* ctx, EditAction action);
 }  // namespace user_rank
 }  // namespace rime

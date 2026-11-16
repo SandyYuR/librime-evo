@@ -12,9 +12,12 @@
 #include <rime/dict/dict_settings.h>
 #include <rime/dict/dictionary.h>
 #include <rime/dict/reverse_lookup_dictionary.h>
+#include <rime/dict/user_dictionary.h>
 #include <rime/engine.h>
 #include <rime/gear/table_translator.h>
 #include <rime/gear/unity_table_encoder.h>
+#include <rime/key_event.h>
+#include <rime/menu.h>
 #include <rime/segmentation.h>
 #include <rime/lever/deployment_tasks.h>
 #include <rime/service.h>
@@ -181,6 +184,275 @@ translator:
   string schema_id_;
   path schema_path_;
 };
+
+class RimeSequentialUserPhraseTest : public RimeBuildDictionaryTest {
+ protected:
+  void SetUp() override {
+    RimeBuildDictionaryTest::SetUp();
+    user_db_ = schema_id_ + ".userdb";
+    std::filesystem::remove_all(path{user_db_});
+    WriteSchema(kDefinitions, true);
+    SchemaUpdate update(schema_path_);
+    ASSERT_TRUE(update.Run(&Service::instance().deployer()));
+  }
+
+  void TearDown() override {
+    reader_.reset();
+    engine_.reset();
+    std::filesystem::remove_all(path{user_db_});
+    RimeBuildDictionaryTest::TearDown();
+  }
+
+  void Start(const string& mode, bool shared_writer = false) {
+    reader_.reset();
+    engine_.reset(Engine::Create());
+    auto config = std::make_unique<Config>();
+    ASSERT_TRUE(config->LoadFromFile(schema_path_));
+    config->SetString("translator/user_dict", schema_id_);
+    config->SetString("translator/user_dict_mode", mode);
+    if (shared_writer) {
+      std::istringstream engine_settings(R"YAML(translators:
+  - {name: script_translator@writer, when: unused}
+  - script_translator
+)YAML");
+      Config settings;
+      ASSERT_TRUE(settings.LoadFromStream(engine_settings));
+      config->SetItem("engine/translators", settings.GetList("translators"));
+      config->SetString("writer/dictionary", "build_dict_other");
+      config->SetString("writer/prism", "pinyin");
+      config->SetString("writer/user_dict", schema_id_);
+      config->SetString("writer/user_dict_mode", "auto");
+    }
+    engine_->ApplySchema(new Schema(schema_id_, config.release()));
+    engine_->context()->set_option("pinyin", true);
+    engine_->sink().connect([&](const string& text) { committed_ = text; });
+    reader_.reset(UserDictionary::Require("user_dictionary")
+                      ->Create(Ticket(engine_->schema(), "translator")));
+    if (mode == "off") {
+      EXPECT_FALSE(reader_);
+    } else {
+      ASSERT_TRUE(reader_);
+      ASSERT_TRUE(reader_->Load());
+    }
+  }
+
+  size_t CandidateIndex(const string& word) {
+    auto& composition = engine_->context()->composition();
+    if (composition.empty() || !composition.back().menu)
+      return string::npos;
+    auto menu = composition.back().menu;
+    const size_t count = menu->Prepare(20);
+    for (size_t i = 0; i < count; ++i) {
+      if (menu->GetCandidateAt(i)->text() == word)
+        return i;
+    }
+    return string::npos;
+  }
+
+  void Select(const string& word) {
+    const size_t index = CandidateIndex(word);
+    ASSERT_NE(string::npos, index) << word;
+    ASSERT_TRUE(engine_->context()->Select(index));
+  }
+
+  bool Read(const string& code, const string& word, UserDbState* state) {
+    DictEntry entry;
+    entry.text = word;
+    entry.custom_code = code;
+    return reader_->GetUserState(entry, state);
+  }
+
+  void Input(const string& code) { engine_->context()->set_input(code); }
+  void Press(int key, int modifiers = 0) {
+    ASSERT_TRUE(engine_->ProcessKey(KeyEvent(key, modifiers)));
+  }
+
+  string user_db_;
+  string committed_;
+  the<Engine> engine_;
+  the<UserDictionary> reader_;
+};
+
+TEST_F(RimeSequentialUserPhraseTest, ManualCreatesOnceAndUsesOrdinaryRanking) {
+  ASSERT_NO_FATAL_FAILURE(Start("manual"));
+  UserDbState state;
+
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("拟"));
+  ASSERT_NO_FATAL_FAILURE(Press(XK_BackSpace));
+  const size_t whole = CandidateIndex("你好");
+  ASSERT_NE(string::npos, whole);
+  engine_->context()->Highlight(whole);
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  EXPECT_EQ("你好", committed_);
+  EXPECT_FALSE(Read("ni hao", "拟好", &state));
+
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("你"));
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  EXPECT_EQ("你好", committed_);
+  EXPECT_FALSE(Read("ni hao", "你好", &state));
+
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("拟"));
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  EXPECT_EQ("拟好", committed_);
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(1, state.commits);
+  EXPECT_EQ(0.0, state.dynamic);
+  EXPECT_EQ(0u, state.last_tick);
+  EXPECT_EQ(0u, state.manual_stamp);
+  EXPECT_EQ(0u, reader_->tick());
+  const auto created = state.Pack();
+  EXPECT_EQ("1,0,0,0,0", created);
+  EXPECT_FALSE(engine_->ProcessKey(KeyEvent(XK_BackSpace, 0)));
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(created, state.Pack());
+
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("拟好"));
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(created, state.Pack());
+
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("拟"));
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(created, state.Pack());
+
+  Input("nihao");
+  const size_t index = CandidateIndex("拟好");
+  ASSERT_NE(string::npos, index);
+  engine_->context()->Highlight(index);
+  EXPECT_FALSE(
+      engine_->ProcessKey(KeyEvent(XK_Delete, kControlMask | kShiftMask)));
+  string deleted_candidate;
+  auto deletion =
+      engine_->context()->delete_notifier().connect([&](Context* ctx) {
+        if (auto candidate = ctx->GetSelectedCandidate())
+          deleted_candidate = candidate->text();
+      });
+  ASSERT_NO_FATAL_FAILURE(Press(XK_Delete, kControlMask));
+  deletion.disconnect();
+  EXPECT_EQ("拟好", deleted_candidate);
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(-1, state.commits);
+  EXPECT_EQ(0u, reader_->tick());
+  EXPECT_EQ(string::npos, CandidateIndex("拟好"));
+
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("拟"));
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ("2,0,0,0,0", state.Pack());
+}
+
+TEST_F(RimeSequentialUserPhraseTest, CtrlDeleteCanMarkWordFromAnotherSession) {
+  ASSERT_NO_FATAL_FAILURE(Start("manual"));
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("拟"));
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  auto first_session = std::move(engine_);
+
+  ASSERT_NO_FATAL_FAILURE(Start("manual"));
+  Input("nihao");
+  const size_t index = CandidateIndex("拟好");
+  ASSERT_NE(string::npos, index);
+  engine_->context()->Highlight(index);
+  ASSERT_NO_FATAL_FAILURE(Press(XK_Delete, kControlMask));
+  EXPECT_EQ(string::npos, CandidateIndex("拟好"));
+  UserDbState state;
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(-1, state.commits);
+  EXPECT_EQ(0u, reader_->tick());
+}
+
+TEST_F(RimeSequentialUserPhraseTest,
+       AutoLearnsWordsWithoutSavingGuessedSentence) {
+  ASSERT_NO_FATAL_FAILURE(Start("auto"));
+  UserDbState state;
+  Input("haohao");
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  EXPECT_EQ("好好", committed_);
+  EXPECT_FALSE(Read("hao hao", "好好", &state));
+  ASSERT_TRUE(Read("hao", "好", &state));
+  EXPECT_EQ(1, state.commits);
+  EXPECT_FALSE(engine_->ProcessKey(KeyEvent(XK_BackSpace, 0)));
+  EXPECT_FALSE(Read("hao", "好", &state));
+
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("拟"));
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  EXPECT_EQ("拟好", committed_);
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(1, state.commits);
+  EXPECT_FALSE(engine_->ProcessKey(KeyEvent(XK_BackSpace, 0)));
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(1, state.commits);
+  EXPECT_FALSE(Read("ni", "拟", &state));
+
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("拟好"));
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(2, state.commits);
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("你好"));
+  Input("nihao");
+  ASSERT_TRUE(Read("ni hao", "你好", &state));
+  EXPECT_EQ(1, state.commits);
+  ASSERT_NO_FATAL_FAILURE(Start("manual"));
+  Input("nihao");
+  EXPECT_NE(string::npos, CandidateIndex("拟好"));
+  const auto menu = engine_->context()->composition().back().menu;
+  ASSERT_TRUE(menu);
+  const auto count = menu->Prepare(20);
+  size_t fixed_word_count = 0;
+  for (size_t i = 0; i < count; ++i) {
+    const auto word = menu->GetCandidateAt(i);
+    if (word->text() == "你好") {
+      EXPECT_EQ("phrase", word->type());
+      ++fixed_word_count;
+    }
+  }
+  EXPECT_EQ(1u, fixed_word_count);
+}
+
+TEST_F(RimeSequentialUserPhraseTest, OffDoesNotOpenUserDictionary) {
+  ASSERT_NO_FATAL_FAILURE(Start("off"));
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("拟"));
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  EXPECT_EQ("拟好", committed_);
+  EXPECT_FALSE(std::filesystem::exists(path{user_db_}));
+}
+
+TEST_F(RimeSequentialUserPhraseTest, SharedWriterUsesActiveTranslatorsMode) {
+  ASSERT_NO_FATAL_FAILURE(Start("manual", true));
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Select("拟"));
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  UserDbState state;
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(1, state.commits);
+  EXPECT_EQ(0u, reader_->tick());
+  Input("nihao");
+  const size_t index = CandidateIndex("拟好");
+  ASSERT_NE(string::npos, index);
+  engine_->context()->Highlight(index);
+  ASSERT_NO_FATAL_FAILURE(Press(index ? XK_Up : XK_Down, kControlMask));
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(1, state.commits);
+  EXPECT_TRUE(state.has_manual_position());
+  EXPECT_EQ(0u, reader_->tick());
+
+  const size_t pinned = CandidateIndex("拟好");
+  ASSERT_NE(string::npos, pinned);
+  engine_->context()->Highlight(pinned);
+  ASSERT_NO_FATAL_FAILURE(Press(XK_Delete, kShiftMask));
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_FALSE(state.has_manual_position());
+  EXPECT_EQ(1, state.commits);
+}
 
 TEST_F(RimeBuildDictionaryTest,
        BuildsWithoutConsumersAndKeepsNamespacesSeparate) {

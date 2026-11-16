@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <stack>
 #include <cmath>
+#include <tuple>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/range/adaptor/reversed.hpp>
 #include <rime/common.h>
@@ -222,7 +223,6 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
   if (Config* config = engine_->schema()->config()) {
     config->GetInt(name_space_ + "/spelling_hints", &spelling_hints_);
     config->GetInt(name_space_ + "/max_word_length", &max_word_length_);
-    config->GetInt(name_space_ + "/core_word_length", &core_word_length_);
     config->GetBool(name_space_ + "/always_show_comments",
                     &always_show_comments_);
     config->GetBool(name_space_ + "/enable_correction", &enable_correction_);
@@ -261,7 +261,8 @@ an<Translation> ScriptTranslator::Query(const string& input,
   DLOG(INFO) << "input = '" << input << "', [" << segment.start << ", "
              << segment.end << ")";
 
-  FinishSession();
+  if (auto* writer = UserDbWriter())
+    writer->FinishSession();
 
   auto* context = engine_->context();
   string auxiliary_suffix;
@@ -341,72 +342,106 @@ bool ScriptTranslator::LoadAuxiliaryMatcher() {
   return true;
 }
 
-int ScriptTranslator::core_word_length() const {
-  if (max_word_length_ <= 0) {
-    return core_word_length_;
-  }
-  return (std::min)(core_word_length_, max_word_length_);
-}
-
-static bool exceed_upperlimit(int length, int upper_limit) {
-  return upper_limit > 0 && length > upper_limit;
-}
-
-bool ScriptTranslator::SaveCommitEntry(CommitEntry& commit_entry) {
-  if (commit_entry.empty())
-    return true;
-  if (!StartSession())
-    return false;
-  if (exceed_upperlimit(commit_entry.Length(), max_word_length()))
-    return UpdateElements(commit_entry);
-  return commit_entry.Save();
-}
-
-bool ScriptTranslator::ConcatenatePhrases(CommitEntry& commit_entry,
-                                          const vector<an<Phrase>>& phrases) {
-  const int kCoreWordLength = core_word_length();
-  const int n = phrases.size();
-  for (int i = 0; i < n; ++i) {
-    int cur_len = 0;
-    int j = i;
-    for (; j < n; ++j) {
-      commit_entry.AppendPhrase(phrases.at(j));
-      cur_len += phrases.at(j)->code().size();
-      if (kCoreWordLength <= 0 || cur_len > kCoreWordLength)
-        break;
-      if (!SaveCommitEntry(commit_entry))
-        return false;
-    }
-    if (kCoreWordLength > 0) {
-      if (j == i && !SaveCommitEntry(commit_entry))
-        return false;
-      commit_entry.Clear();
-    }
-  }
-  const bool ok = SaveCommitEntry(commit_entry);
-  commit_entry.Clear();
-  return ok;
-}
-
-bool ScriptTranslator::ProcessSegmentOnCommit(CommitEntry& commit_entry,
-                                              const Segment& seg) {
-  auto phrase =
-      As<Phrase>(Candidate::GetGenuineCandidate(seg.GetSelectedCandidate()));
-  const bool recognized = OwnsPhrase(phrase);
-  if (recognized)
-    queue_.push_back(phrase);
-  if (!recognized || seg.status >= Segment::kConfirmed) {
-    if (!ConcatenatePhrases(commit_entry, queue_))
+bool ScriptTranslator::CollectSelectedPhrase(Context* ctx, DictEntry* entry) {
+  bool previous_was_prefix = true;
+  size_t end = 0;
+  size_t segments = 0;
+  for (const auto& seg : ctx->composition()) {
+    if (seg.start == seg.end)
+      continue;
+    const bool prefix = seg.HasUserPrefixSelection();
+    if (!previous_was_prefix || !seg.HasUserSelection() || seg.start != end)
       return false;
-    queue_.clear();
+    if (segments == 0 && !prefix)
+      return false;
+    auto phrase =
+        As<Phrase>(Candidate::GetGenuineCandidate(seg.GetSelectedCandidate()));
+    if (!OwnsPhrase(phrase) || As<Sentence>(phrase) ||
+        !phrase->is_exact_match() || phrase->code().empty())
+      return false;
+    entry->text += phrase->text();
+    entry->code.insert(entry->code.end(), phrase->code().begin(),
+                       phrase->code().end());
+    ++segments;
+    end = seg.end;
+    previous_was_prefix = prefix;
+  }
+  return segments >= 2 && end == ctx->input().size() &&
+         (max_word_length_ <= 0 ||
+          entry->code.size() <= static_cast<size_t>(max_word_length_));
+}
+
+bool ScriptTranslator::WritePhrase(Memory* writer,
+                                   const DictEntry& entry,
+                                   bool learn) {
+  auto write = [&](const DictEntry& canonical) {
+    return (!learn || writer->StartSession()) &&
+           writer->user_dict()->RecordPhrase(canonical, learn);
+  };
+  if (writer == this)
+    return write(entry);
+  // Shared databases store syllable strings. Each translator's numeric
+  // syllable IDs belong to its own dictionary.
+  DictEntry normalized;
+  normalized.text = entry.text;
+  return user_dict_->GetEntryCode(entry, &normalized.custom_code) &&
+         write(normalized);
+}
+
+bool ScriptTranslator::LearnFromCommit(Context* ctx, Memory* writer) {
+  if (!dict_ || !dict_->loaded() || ctx->get_option("dumb") ||
+      IsUserDictDisabledFor(ctx->input()))
+    return true;
+
+  const bool learn = user_dict_->automatic_learning_enabled();
+  DictEntry selected;
+  if (ctx->composition().size() > 1 && CollectSelectedPhrase(ctx, &selected)) {
+    if (dict_->Contains(selected.code, selected.text))
+      return !learn || WritePhrase(writer, selected, true);
+    // Candidate lookups use the committed UserDB view. Publish a new word
+    // before the next composition, independently of pending frequency edits.
+    return writer->FinishSession() && WritePhrase(writer, selected, learn) &&
+           (!learn || writer->FinishSession());
+  }
+  if (!learn)
+    return true;
+
+  // An assembled sentence supplies existing words to tune. Its concatenated
+  // text is only saved when the user has selected the parts explicitly.
+  auto compare_entries = [](const DictEntry* left, const DictEntry* right) {
+    return std::tie(left->code, left->text) <
+           std::tie(right->code, right->text);
+  };
+  set<const DictEntry*, decltype(compare_entries)> learned(compare_entries);
+  const DictEntry* first = nullptr;
+  auto update = [&](const DictEntry& entry) {
+    if (entry.code.empty() ||
+        (max_word_length_ > 0 &&
+         entry.code.size() > static_cast<size_t>(max_word_length_)))
+      return true;
+    // Ordinary one-candidate commits need no deduplication container entries.
+    if (!first)
+      first = &entry;
+    else if ((first->code == entry.code && first->text == entry.text) ||
+             !learned.insert(&entry).second)
+      return true;
+    return WritePhrase(writer, entry, true);
+  };
+  for (const auto& seg : ctx->composition()) {
+    auto phrase =
+        As<Phrase>(Candidate::GetGenuineCandidate(seg.GetSelectedCandidate()));
+    if (!OwnsPhrase(phrase))
+      continue;
+    if (auto sentence = As<Sentence>(phrase)) {
+      for (const auto& word : sentence->components()) {
+        if (!update(word))
+          return false;
+      }
+    } else if (!update(phrase->entry())) {
+      return false;
+    }
   }
   return true;
-}
-
-bool ScriptTranslator::FlushPendingCommit(CommitEntry& commit_entry) {
-  const bool ok = ConcatenatePhrases(commit_entry, queue_);
-  queue_.clear();
-  return ok;
 }
 
 string ScriptTranslator::FormatPreedit(const string& preedit) {
@@ -431,34 +466,8 @@ string ScriptTranslator::GetPrecedingText(size_t start) const {
                      : engine_->context()->commit_history().latest_text();
 }
 
-bool ScriptTranslator::UpdateElements(const CommitEntry& commit_entry) {
-  bool update_elements = false;
-  // avoid updating single character entries within a phrase which is
-  // composed with single characters only
-  if (commit_entry.elements.size() > 1) {
-    for (const DictEntry* e : commit_entry.elements) {
-      if (e->code.size() > 1) {
-        update_elements = true;
-        break;
-      }
-    }
-  }
-  if (update_elements) {
-    for (const DictEntry* e : commit_entry.elements) {
-      if (!user_dict_->UpdateEntry(*e, 0))
-        return false;
-    }
-  }
-  return true;
-}
-
 bool ScriptTranslator::Memorize(const CommitEntry& commit_entry) {
-  if (!user_dict_)
-    return false;
-  if (!UpdateElements(commit_entry))
-    return false;
-  const bool written = user_dict_->UpdateEntry(commit_entry, 1);
-  return written;
+  return user_dict_ && user_dict_->UpdateEntry(commit_entry, 1);
 }
 
 // ScriptSyllabifier implementation
@@ -599,6 +608,34 @@ static void RemoveExhaustedBuckets(const an<Collector>& collector) {
   }
 }
 
+static void RankUserPhrases(Dictionary& dictionary,
+                            const an<DictEntryCollector>& system,
+                            const an<UserDictEntryCollector>& users,
+                            bool use_automatic,
+                            bool isolate_code = false) {
+  if (!users)
+    return;
+  for (auto& [end, entries] : *users) {
+    if (!use_automatic) {
+      // Keep a fixed word's original ranking when the user copy has no pin.
+      auto& words = entries.entries();
+      words.erase(std::remove_if(words.begin(), words.end(),
+                                 [&](const an<DictEntry>& word) {
+                                   return word->manual_position == 0 &&
+                                          dictionary.Contains(word->code,
+                                                              word->text);
+                                 }),
+                  words.end());
+    }
+    DictEntryIterator* fixed = nullptr;
+    if (system) {
+      if (auto found = system->find(end); found != system->end())
+        fixed = &found->second;
+    }
+    user_rank::Apply(fixed, &entries, isolate_code);
+  }
+}
+
 // ScriptTranslation implementation
 
 bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
@@ -623,18 +660,9 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
                                  auxiliary_suffix_);
   }
   // AUX 过滤后再计算手排位置。
-  if (user_phrase_) {
-    for (auto& by_end : *user_phrase_) {
-      DictEntryIterator* sys = nullptr;
-      if (phrase_) {
-        auto found = phrase_->find(by_end.first);
-        if (found != phrase_->end())
-          sys = &found->second;
-      }
-      // 同一输入区间的不同读音共用可见候选绝对位置。
-      user_rank::Apply(sys, &by_end.second);
-    }
-  }
+  if (user_dict)
+    RankUserPhrases(*dict, phrase_, user_phrase_,
+                    user_dict->automatic_learning_enabled());
   // 手排过滤只会耗尽桶内迭代器，不会删除外层编码桶；这里统一清理。
   RemoveExhaustedBuckets(phrase_);
   RemoveExhaustedBuckets(user_phrase_);
@@ -906,18 +934,10 @@ WordGraph ScriptTranslation::PrepareForMakingSentence(
                             : nullptr;
     auto system_results =
         dict->Lookup(syllable_graph, x.first, &translator_->blacklist());
-    if (user_results) {
-      for (auto& y : *user_results) {
-        DictEntryIterator* sys = nullptr;
-        if (system_results) {
-          auto found = system_results->find(y.first);
-          if (found != system_results->end())
-            sys = &found->second;
-        }
-        // 句子组合仍按读音隔离，避免手排跨读音影响 Poet 的路径评分。
-        user_rank::Apply(sys, &y.second, true);
-      }
-    }
+    // 句子组合仍按读音隔离，避免手排跨读音影响 Poet 的路径评分。
+    if (user_dict)
+      RankUserPhrases(*dict, system_results, user_results,
+                      user_dict->automatic_learning_enabled(), true);
     EnrollEntries(same_start_pos, user_results);
     EnrollEntries(same_start_pos, system_results);
   }

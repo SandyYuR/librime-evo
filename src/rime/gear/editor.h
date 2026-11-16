@@ -39,7 +39,6 @@ class Editor : public Processor, public KeyBindingProcessor<Editor> {
   // Keep declarations here in sync with editor.cc and editor/bindings.
   Handler ManualUp;
   Handler ManualDown;
-  Handler AutoDel;
   Handler ManualDel;
   Handler DeleteChar;
   Handler CancelComposition;

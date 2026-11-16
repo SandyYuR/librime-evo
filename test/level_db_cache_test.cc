@@ -167,8 +167,11 @@ TEST_P(RimeLevelDbCacheTest, SharedHandlesObserveManualChangesWithoutTick) {
   EXPECT_EQ(tick, writer.tick());
   ASSERT_TRUE(writer.ResetManualPosition(selected));
   UserDictEntryIterator cleared;
-  reader.LookupWords(&cleared, "ni", false);
-  EXPECT_TRUE(cleared.exhausted());
+  ASSERT_EQ(1u, reader.LookupWords(&cleared, "ni", false));
+  ASSERT_FALSE(cleared.exhausted());
+  EXPECT_EQ(0, cleared.Peek()->manual_position);
+  EXPECT_EQ(0, cleared.Peek()->commit_count);
+  EXPECT_EQ(tick, writer.tick());
   ASSERT_TRUE(reader.Reload());
 }
 

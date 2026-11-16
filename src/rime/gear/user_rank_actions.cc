@@ -27,7 +27,6 @@ bool ApplyEditAction(Engine* engine, Context* ctx, EditAction action) {
   const int direction = action == EditAction::kMoveUp     ? -1
                         : action == EditAction::kMoveDown ? 1
                                                           : 0;
-  const bool reset_auto = action == EditAction::kResetAuto;
   const bool reset_manual = action == EditAction::kResetManual;
   // 菜单动作只作用于当前可编辑候选。
   if (!ctx || !ctx->IsComposing() || !ctx->HasMenu() ||
@@ -68,8 +67,10 @@ bool ApplyEditAction(Engine* engine, Context* ctx, EditAction action) {
     return true;
   }
   UserDictionary* db = source_memory->user_dict();
-  if (!db->loaded() || db->readonly() || !source_memory->IsUserDbWriter())
+  auto* writer = source_memory->UserDbWriter();
+  if (!writer)
     return true;
+  UserDictionary* write_db = writer->user_dict();
   // 写入和读取固定位置之前，先提交共享库上尚未落盘的学习事务。
   if (!Memory::FinishSharedSession(db)) {
     LOG(ERROR) << "cannot finish pending UserDB session before manual action: "
@@ -143,14 +144,12 @@ bool ApplyEditAction(Engine* engine, Context* ctx, EditAction action) {
   }
 
   bool committed = false;
-  if (reset_auto) {
-    committed = db->ResetAutoLearning(selected_entry);
-  } else if (reset_manual) {
-    committed = db->ResetManualPosition(selected_entry);
+  if (reset_manual) {
+    committed = write_db->ResetManualPosition(selected_entry);
   } else {
     committed =
-        db->MoveManualOneStep(selected_entry, neighbor_entry, local_position,
-                              direction, direction != 0);
+        write_db->MoveManualOneStep(selected_entry, neighbor_entry,
+                                    local_position, direction, direction != 0);
   }
   if (!committed && direction != 0)
     LOG(WARNING) << "UserDB manual move failed: db=" << db->name()

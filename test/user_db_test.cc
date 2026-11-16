@@ -168,6 +168,24 @@ TEST(RimeUserDbStateTest, ManualStampAndClear) {
   EXPECT_EQ(a.manual_stamp, 4u);
 }
 
+TEST(RimeUserDbStateTest, SyncKeepsDeletionUntilTheWordIsRecreated) {
+  UserDbState original, deleted, recreated;
+  ASSERT_TRUE(original.Unpack("1,0,0,0,0"));
+  ASSERT_TRUE(deleted.Unpack("-1,0,0,0,0"));
+  ASSERT_TRUE(recreated.Unpack("2,0,0,0,0"));
+
+  auto state = original;
+  state.Merge(deleted, 0, 0);
+  EXPECT_EQ(-1, state.commits);
+  state.Merge(original, 0, 0);
+  EXPECT_EQ(-1, state.commits);
+
+  state.Merge(recreated, 0, 0);
+  EXPECT_EQ(2, state.commits);
+  state.Merge(deleted, 0, 0);
+  EXPECT_EQ(2, state.commits);
+}
+
 TEST(RimeUserDbStateTest, UpstreamAutomaticMergerUsesEachDatabaseTick) {
   // 本机按 /tick 衰减，远端取原值；动态值取较大者。
   UserDbState local, remote;

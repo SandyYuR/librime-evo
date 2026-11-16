@@ -56,6 +56,10 @@ struct Segment {
 
   void Close();
   bool Reopen(size_t caret_pos);
+  void RecordUserSelection(const Candidate& candidate, size_t input_end);
+  bool HasUserSelection() const;
+  bool HasUserPrefixSelection() const;
+  void ClearUserSelection();
 
   bool HasTag(const string& tag) const { return tags.find(tag) != tags.end(); }
   bool HasAnyTagIn(const vector<string>& tags) const {

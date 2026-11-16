@@ -162,8 +162,6 @@ bool UserDbState::Unpack(const string& raw) {
 
 string UserDbState::Pack() const {
   std::ostringstream stream;
-  // Match the original UserDbValue serialization precision (six significant
-  // digits) while keeping the five-field format stable.
   stream << commits << ',' << dynamic << ',' << last_tick << ',' << position
          << ',' << manual_stamp_codec::Format(manual_stamp);
   return stream.str();
@@ -186,7 +184,11 @@ void UserDbState::MergeAutomatic(const UserDbState& other,
   const auto magnitude = [](int count) -> int64_t {
     return count < 0 ? -int64_t(count) : int64_t(count);
   };
-  if (magnitude(commits) < magnitude(other.commits))
+  const auto local_count = magnitude(commits);
+  const auto remote_count = magnitude(other.commits);
+  // A deletion must win against the same count in an older snapshot.
+  if (remote_count > local_count ||
+      (remote_count == local_count && other.commits < commits))
     commits = other.commits;
   dynamic = (std::max)(local_dynamic, remote_dynamic);
   last_tick = (std::max)(local_tick, remote_tick);

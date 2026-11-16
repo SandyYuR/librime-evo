@@ -53,6 +53,7 @@ class RIME_DLL Context {
   bool DeleteCandidate(size_t index);
   // return false if there's no candidate for current segment
   bool ConfirmCurrentSelection();
+  bool ConfirmSelectionByUser();
   bool DeleteCurrentSelection();
   void BeginEditing();
   bool ConfirmPreviousSelection();  // deprecated
@@ -98,6 +99,7 @@ class RIME_DLL Context {
   KeyEventNotifier& unhandled_key_notifier() { return unhandled_key_notifier_; }
 
  private:
+  bool ConfirmSelection(bool by_user);
   string GetSoftCursor() const;
 
   string input_;
@@ -115,6 +117,7 @@ class RIME_DLL Context {
   OptionUpdateNotifier option_update_notifier_;
   PropertyUpdateNotifier property_update_notifier_;
   KeyEventNotifier unhandled_key_notifier_;
+  bool* deferred_refresh_ = nullptr;
 };
 
 }  // namespace rime

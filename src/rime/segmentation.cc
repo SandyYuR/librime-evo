@@ -13,6 +13,33 @@
 namespace rime {
 
 static const char* kPartialSelectionTag = "partial";
+static const string kUserSelectionTag = "user_selected";
+static const string kUserPrefixSelectionTag = "user_selected_prefix";
+
+void Segment::RecordUserSelection(const Candidate& candidate,
+                                  size_t input_end) {
+  ClearUserSelection();
+  const size_t selected_end =
+      auxiliary_suffix && candidate.end() == auxiliary_suffix->trigger_start
+          ? auxiliary_suffix->end
+          : candidate.end();
+  tags.insert(selected_end < input_end ? kUserPrefixSelectionTag
+                                       : kUserSelectionTag);
+}
+
+bool Segment::HasUserSelection() const {
+  return status >= kSelected &&
+         (HasTag(kUserSelectionTag) || HasTag(kUserPrefixSelectionTag));
+}
+
+bool Segment::HasUserPrefixSelection() const {
+  return status >= kSelected && HasTag(kUserPrefixSelectionTag);
+}
+
+void Segment::ClearUserSelection() {
+  tags.erase(kUserSelectionTag);
+  tags.erase(kUserPrefixSelectionTag);
+}
 
 void Segment::Close() {
   auto cand = GetSelectedCandidate();
@@ -36,6 +63,7 @@ bool Segment::Reopen(size_t caret_pos) {
   if (status < kSelected) {
     return false;
   }
+  ClearUserSelection();
   const size_t original_end_pos = start + length;
   if (auxiliary_suffix)
     end = auxiliary_suffix->trigger_start;

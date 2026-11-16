@@ -100,6 +100,7 @@ class Dictionary : public Class<Dictionary, const Ticket&> {
                               const hash_set<string>* blacklist = nullptr);
   // translate syllable id sequence to string code
   RIME_DLL bool Decode(const Code& code, vector<string>* result);
+  bool Contains(const Code& code, const string& text);
   void LookupCharacters(SyllableId id, set<string>* result);
 
   const string& name() const { return name_; }

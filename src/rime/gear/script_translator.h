@@ -39,18 +39,10 @@ class ScriptTranslator : public Translator,
     return !auxiliary_type_.empty();
   }
   virtual bool Memorize(const CommitEntry& commit_entry) override;
-  virtual bool ProcessSegmentOnCommit(CommitEntry& commit_entry,
-                                      const Segment& seg) override;
-  bool FlushPendingCommit(CommitEntry& commit_entry) override;
 
   string FormatPreedit(const string& preedit);
   string Spell(const Code& code);
   string GetPrecedingText(size_t start) const;
-  bool UpdateElements(const CommitEntry& commit_entry);
-
-  bool ConcatenatePhrases(CommitEntry& commit_entry,
-                          const vector<an<Phrase>>& phrases);
-  bool SaveCommitEntry(CommitEntry& commit_entry);
   bool SelectPrism();
 
   // options
@@ -61,15 +53,12 @@ class ScriptTranslator : public Translator,
   std::shared_ptr<AuxiliaryMatcher> auxiliary_matcher() const {
     return auxiliary_matcher_;
   }
-  int max_word_length() const { return max_word_length_; }
-  int core_word_length() const;
   Projection* canonicalizer() const { return canonicalizer_.get(); }
 
  protected:
   int max_homophones_ = 1;
   int spelling_hints_ = 0;
   int max_word_length_ = 0;
-  int core_word_length_ = 0;
   bool always_show_comments_ = false;
   bool enable_correction_ = false;
   bool enable_word_completion_ = false;
@@ -81,9 +70,12 @@ class ScriptTranslator : public Translator,
   bool enable_direct_aux_ = false;
   string direct_aux_option_;
   the<Poet> poet_;
-  vector<an<Phrase>> queue_;
+
+  bool LearnFromCommit(Context* ctx, Memory* writer) override;
 
  private:
+  bool CollectSelectedPhrase(Context* ctx, DictEntry* entry);
+  bool WritePhrase(Memory* writer, const DictEntry& entry, bool learn);
   bool DirectAuxiliaryEnabled() const;
   bool LoadAuxiliaryMatcher();
 };

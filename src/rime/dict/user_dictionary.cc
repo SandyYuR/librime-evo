@@ -536,20 +536,29 @@ bool UserDictionary::UpdateEntry(const DictEntry& entry,
                                  const string& new_entry_prefix) {
   if (!loaded() || readonly() || !write_owner_)
     return false;
-  // 手动模式只允许手排；自动学习和自动删除都不能改动前三字段。
+  // 自动学习和自动删除只修改自动权重字段。
   if (user_dict_mode_ != "auto")
     return commits >= 0;
-  // commits=0 时仅增加 0.1 动态值。
-  string code_str(entry.custom_code);
-  if (code_str.empty() && !TranslateCodeToString(entry.code, &code_str)) {
+  return WriteEntry(entry, commits, new_entry_prefix);
+}
+
+bool UserDictionary::RecordPhrase(const DictEntry& entry, bool learn) {
+  if (!loaded() || readonly() || !write_owner_)
     return false;
-  }
-  if (code_str.empty()) {
+  if (learn)
+    return transaction_active_ && WriteEntry(entry, 1, "");
+  const auto* transaction = dynamic_cast<const Transactional*>(db_.get());
+  return (!transaction || !transaction->in_transaction()) &&
+         WriteEntry(entry, 1, "", false);
+}
+
+bool UserDictionary::WriteEntry(const DictEntry& entry,
+                                int commits,
+                                const string& new_entry_prefix,
+                                bool learn) {
+  string code_str;
+  if (!GetEntryCode(entry, &code_str))
     return false;
-  }
-  // 键的编码末尾必须有空格。
-  if (code_str.back() != ' ')
-    code_str += ' ';
   string key(code_str + '\t' + entry.text);
   string raw;
   UserDbState state;
@@ -559,6 +568,15 @@ bool UserDictionary::UpdateEntry(const DictEntry& entry,
   }
   if (!exists && !new_entry_prefix.empty())
     key.insert(0, new_entry_prefix);
+  if (!learn) {
+    if (state.commits > 0)
+      return true;
+    if (state.commits <= -INT_MAX)
+      return false;
+    // A re-created word must supersede its previous deletion mark on sync.
+    state.commits = 1 - state.commits;
+    return db_->Update(key, state.Pack());
+  }
   bool ok = true;
   // 沿用原版学习公式；只有主动选择增加 /tick。
   if (commits > 0) {
@@ -578,7 +596,8 @@ bool UserDictionary::UpdateEntry(const DictEntry& entry,
     if (state.last_tick > tick_)
       state.last_tick = tick_;
     ok = state.MarkDeleted(tick_);
-  } else if (commits == 0) {
+  } else {
+    // commits=0 时仅增加 0.1 动态值。
     if (state.last_tick > tick_)
       state.last_tick = tick_;
     ok = state.Learn(0, tick_);
@@ -808,7 +827,7 @@ an<DictEntry> UserDictionary::CreateDictEntry(const string& key,
     return e;
   const bool pinned = v.has_manual_position();
   // 自动删除词仅在有效手排时显示；清除手排后重新隐藏。
-  if (!pinned && (!use_automatic || !v.has_learning()))
+  if (!pinned && !(use_automatic ? v.has_learning() : v.commits > 0))
     return e;
   e = New<DictEntry>();
   e->text = key.substr(separator_pos + 1);

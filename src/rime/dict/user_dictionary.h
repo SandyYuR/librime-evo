@@ -93,6 +93,7 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
   bool UpdateEntry(const DictEntry& entry,
                    int commits,
                    const string& new_entry_prefix);
+  bool RecordPhrase(const DictEntry& entry, bool learn);
   // 同一记录包含自动学习和手排数据。
   bool GetUserState(const DictEntry& entry, UserDbState* state);
   // 按所属词典解析编码，跨翻译器手排必须先规范化编码。
@@ -152,6 +153,10 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
                  DfsState* state);
 
  private:
+  bool WriteEntry(const DictEntry& entry,
+                  int commits,
+                  const string& new_entry_prefix,
+                  bool learn = true);
   string name_;
   an<Db> db_;
   std::shared_ptr<std::atomic<TickCount>> shared_tick_;

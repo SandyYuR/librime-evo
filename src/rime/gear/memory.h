@@ -31,7 +31,6 @@ struct CommitEntry : DictEntry {
   void Clear();
   void AppendPhrase(const an<Phrase>& phrase);
   bool Save() const;
-  int Length() const;
 };
 
 class Memory {
@@ -56,13 +55,14 @@ class Memory {
 
   const Language* language() const { return language_.get(); }
   static Memory* FindManualSource(Engine* engine, const Language* source);
-  bool IsUserDbWriter() const { return user_db_writer_; }
+  Memory* UserDbWriter();
 
  protected:
   bool OwnsLanguage(const Language* source) const {
     return source && source == language();
   }
   bool OwnsPhrase(const an<Phrase>& phrase) const;
+  virtual bool LearnFromCommit(Context* ctx, Memory* writer);
   void OnCommit(Context* ctx);
   void OnUnhandledKey(Context* ctx, const KeyEvent& key);
   void OnDeleteEntry(Context* ctx);
@@ -75,6 +75,7 @@ class Memory {
   bool session_active_ = false;
 
  private:
+  static Memory* FinishSharedSessionLocked(UserDictionary* user_dict);
   connection commit_connection_;
   connection unhandled_key_connection_;
   connection delete_connection_;

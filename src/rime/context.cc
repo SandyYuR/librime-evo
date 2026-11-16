@@ -6,6 +6,7 @@
 //
 #include <algorithm>
 #include <utility>
+#include <boost/scope_exit.hpp>
 #include <rime/candidate.h>
 #include <rime/context.h>
 #include <rime/menu.h>
@@ -122,6 +123,7 @@ bool Context::Select(size_t index) {
   if (auto cand = seg.GetCandidateAt(index)) {
     seg.selected_index = index;
     seg.status = Segment::kSelected;
+    seg.RecordUserSelection(*cand, input_.size());
     DLOG(INFO) << "Selected: '" << cand->text() << "', index = " << index;
     select_notifier_(this);
     return true;
@@ -152,9 +154,22 @@ bool Context::DeleteCandidate(size_t index) {
   if (composition_.empty())
     return false;
   Segment& seg(composition_.back());
+  auto candidate = seg.GetCandidateAt(index);
+  if (!candidate)
+    return false;
   seg.selected_index = index;
-  DLOG(INFO) << "Deleting candidate: " << seg.GetSelectedCandidate()->text();
-  delete_notifier_(this);
+  DLOG(INFO) << "Deleting candidate: " << candidate->text();
+  // Keep the deleted candidate selected until all listeners have seen it.
+  bool refresh = false;
+  {
+    auto* previous_refresh = std::exchange(deferred_refresh_, &refresh);
+    BOOST_SCOPE_EXIT_ALL(&) {
+      deferred_refresh_ = previous_refresh;
+    };
+    delete_notifier_(this);
+  }
+  if (refresh)
+    RefreshNonConfirmedComposition();
   return true;  // CAVEAT: this doesn't mean anything is deleted for sure
 }
 
@@ -166,14 +181,27 @@ bool Context::DeleteCurrentSelection() {
 }
 
 bool Context::ConfirmCurrentSelection() {
+  return ConfirmSelection(false);
+}
+
+bool Context::ConfirmSelectionByUser() {
+  return ConfirmSelection(true);
+}
+
+bool Context::ConfirmSelection(bool by_user) {
   if (composition_.empty())
     return false;
   Segment& seg(composition_.back());
   seg.status = Segment::kSelected;
   if (auto cand = seg.GetSelectedCandidate()) {
+    if (by_user)
+      seg.RecordUserSelection(*cand, input_.size());
+    else
+      seg.ClearUserSelection();
     DLOG(INFO) << "Confirmed: '" << cand->text()
                << "', selected_index = " << seg.selected_index;
   } else {
+    seg.ClearUserSelection();
     if (seg.end == seg.start) {
       // fluid_editor will confirm the whole sentence
       return false;
@@ -258,6 +286,10 @@ bool Context::ClearNonConfirmedComposition() {
 }
 
 bool Context::RefreshNonConfirmedComposition() {
+  if (deferred_refresh_) {
+    *deferred_refresh_ = true;
+    return true;
+  }
   if (ClearNonConfirmedComposition()) {
     update_notifier_(this);
     return true;

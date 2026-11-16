@@ -52,16 +52,6 @@ bool CommitEntry::Save() const {
   return false;
 }
 
-int CommitEntry::Length() const {
-  int length = 0;
-  for (const DictEntry* e : elements) {
-    if (e) {
-      length += e->code.size();
-    }
-  }
-  return length;
-}
-
 namespace {
 struct MemoryRegistry {
   std::mutex mutex;
@@ -210,6 +200,21 @@ bool Memory::OwnsPhrase(const an<Phrase>& phrase) const {
   return phrase && OwnsLanguage(phrase->language());
 }
 
+Memory* Memory::UserDbWriter() {
+  if (!user_dict_ || !user_dict_->loaded() || user_dict_->readonly())
+    return nullptr;
+  if (user_db_writer_)
+    return this;
+  auto& sources = MemoryRegistryInstance();
+  std::lock_guard<std::mutex> lock(sources.mutex);
+  auto writer = sources.writer_owner.find(user_dict_->storage_identity());
+  // A transaction can only be undone by the engine that owns the composition.
+  return writer != sources.writer_owner.end() &&
+                 writer->second->manual_engine_ == manual_engine_
+             ? writer->second
+             : nullptr;
+}
+
 bool Memory::StartSession() {
   if (!user_dict_ || !user_db_writer_ || !user_dict_->write_owner())
     return false;
@@ -326,15 +331,20 @@ bool Memory::FinishSharedSession(UserDictionary* user_dict) {
     return false;
   auto& sources = MemoryRegistryInstance();
   std::lock_guard<std::mutex> lock(sources.mutex);
+  return FinishSharedSessionLocked(user_dict) != nullptr;
+}
+
+Memory* Memory::FinishSharedSessionLocked(UserDictionary* user_dict) {
+  auto& sources = MemoryRegistryInstance();
   const Db* storage = user_dict->storage_identity();
   const auto* tx = dynamic_cast<const Transactional*>(storage);
   if (!tx)
-    return false;
+    return nullptr;
 
   auto writer = sources.writer_owner.find(storage);
   if (writer == sources.writer_owner.end() || !writer->second ||
       !writer->second->user_dict_)
-    return false;
+    return nullptr;
   Memory* owner = writer->second;
   auto session = sources.session_owner.find(storage);
   if (!tx->in_transaction()) {
@@ -343,19 +353,19 @@ bool Memory::FinishSharedSession(UserDictionary* user_dict) {
       sources.session_owner.erase(session);
       owner->session_active_ = false;
     }
-    return true;
+    return owner;
   }
   if (session == sources.session_owner.end() || session->second != owner ||
       !owner->user_dict_->HasPendingTransaction()) {
     LOG(WARNING) << "UserDB manual action blocked by an unowned transaction: "
                  << user_dict->name();
-    return false;
+    return nullptr;
   }
   if (!owner->user_dict_->CommitPendingTransaction())
-    return false;
+    return nullptr;
   sources.session_owner.erase(session);
   owner->session_active_ = false;
-  return true;
+  return owner;
 }
 
 bool Memory::ProcessSegmentOnCommit(CommitEntry& commit_entry,
@@ -381,35 +391,51 @@ bool Memory::FlushPendingCommit(CommitEntry& commit_entry) {
   return saved;
 }
 
-void Memory::OnCommit(Context* ctx) {
-  if (!ctx || !user_dict_ || !user_dict_->loaded() || user_dict_->readonly() ||
-      !user_db_writer_ || !user_dict_->automatic_learning_enabled())
-    return;
+bool Memory::LearnFromCommit(Context* ctx, Memory* writer) {
+  if (writer != this || !user_dict_->automatic_learning_enabled())
+    return true;
   // Start lazily in CommitEntry::Save(): process the composition once and
   // avoid opening an empty transaction for foreign or non-learning entries.
   CommitEntry commit_entry(this);
-  bool ok = true;
   for (const auto& seg : ctx->composition()) {
-    if (!ProcessSegmentOnCommit(commit_entry, seg)) {
-      ok = false;
-      break;
-    }
+    if (!ProcessSegmentOnCommit(commit_entry, seg))
+      return false;
   }
-  if (ok)
-    ok = FlushPendingCommit(commit_entry);
-  if (!ok && !AbortSession())
-    LOG(ERROR) << "failed to abort UserDB learning transaction";
+  return FlushPendingCommit(commit_entry);
+}
+
+void Memory::OnCommit(Context* ctx) {
+  if (!ctx)
+    return;
+  auto* writer = UserDbWriter();
+  if (writer && !LearnFromCommit(ctx, writer)) {
+    LOG(ERROR) << "failed to record UserDB commit: " << user_dict_->name();
+    if (!writer->AbortSession())
+      LOG(ERROR) << "failed to abort UserDB learning transaction";
+  }
 }
 
 void Memory::OnDeleteEntry(Context* ctx) {
-  if (!ctx || !user_dict_ || !user_db_writer_ || user_dict_->readonly() ||
-      !user_dict_->automatic_learning_enabled() || !ctx->HasMenu())
-    return;
   auto phrase =
       As<Phrase>(Candidate::GetGenuineCandidate(ctx->GetSelectedCandidate()));
-  if (OwnsPhrase(phrase) && user_dict_->UpdateEntry(phrase->entry(), -1)) {
-    ctx->RefreshNonConfirmedComposition();
+  if (!OwnsPhrase(phrase) || !user_dict_ || !user_dict_->loaded() ||
+      user_dict_->readonly())
+    return;
+  bool removed;
+  {
+    auto& sources = MemoryRegistryInstance();
+    std::lock_guard<std::mutex> lock(sources.mutex);
+    // An explicit deletion is durable, including from another input session.
+    auto* writer = FinishSharedSessionLocked(user_dict_.get());
+    if (!writer)
+      return;
+    DictEntry entry = phrase->entry();
+    if (writer != this && !user_dict_->GetEntryCode(entry, &entry.custom_code))
+      return;
+    removed = writer->user_dict()->ResetAutoLearning(entry);
   }
+  if (removed)
+    ctx->RefreshNonConfirmedComposition();
 }
 
 void Memory::OnUnhandledKey(Context*, const KeyEvent& key) {

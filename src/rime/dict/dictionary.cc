@@ -599,6 +599,21 @@ static void lookup_table(Table* table,
   }
 }
 
+bool Dictionary::Contains(const Code& code, const string& text) {
+  if (!loaded() || code.empty())
+    return false;
+  for (size_t i = 0; i < tables_.size(); ++i) {
+    auto& table = tables_[i];
+    for (auto entries = table->QueryPhrases(code, &code_maps_[i]);
+         !entries.exhausted(); entries.Next()) {
+      if (table->GetEntryText(*entries.entry()) == text &&
+          (!entries.extra_code() || entries.code() == code))
+        return true;
+    }
+  }
+  return false;
+}
+
 an<DictEntryCollector> Dictionary::Lookup(const SyllableGraph& syllable_graph,
                                           size_t start_pos,
                                           const hash_set<string>* blacklist,
