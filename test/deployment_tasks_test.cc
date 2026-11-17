@@ -176,7 +176,7 @@ build:
     api->initialize(&traits);
   }
 
-  void WriteDependentSchema(const char* shared_spelling) {
+  void WriteSecondSchema(const char* shared_spelling) {
     std::ofstream(root_ / "workspace_prism_sub.schema.yaml") << R"YAML(schema:
   schema_id: workspace_prism_sub
   version: "1"
@@ -193,7 +193,7 @@ build:
 };
 
 TEST_F(RimeWorkspacePrismTest, SharesPrismOnlyWhenAlgebraMatches) {
-  WriteDependentSchema("ab");
+  WriteSecondSchema("ab");
   WorkspaceUpdate update;
   ASSERT_TRUE(update.Run(&deployer_));
 
@@ -201,6 +201,17 @@ TEST_F(RimeWorkspacePrismTest, SharesPrismOnlyWhenAlgebraMatches) {
       deployer_.staging_dir / "workspace_prism.shared.prism.bin";
   const path standalone_path =
       deployer_.staging_dir / "workspace_prism.standalone.prism.bin";
+  ASSERT_TRUE(fs::exists(shared_path));
+  EXPECT_FALSE(fs::exists(standalone_path));
+  EXPECT_FALSE(
+      fs::exists(deployer_.staging_dir / "workspace_prism_sub.schema.yaml"));
+
+  std::ofstream(root_ / "default.custom.yaml") << R"YAML(patch:
+  schema_list:
+    - schema: workspace_prism_main
+    - schema: workspace_prism_sub
+)YAML";
+  ASSERT_TRUE(update.Run(&deployer_));
   {
     Prism shared(shared_path);
     Prism standalone(standalone_path);
@@ -215,10 +226,10 @@ TEST_F(RimeWorkspacePrismTest, SharesPrismOnlyWhenAlgebraMatches) {
   ASSERT_TRUE(update.Run(&deployer_));
   EXPECT_EQ(last_build, fs::last_write_time(shared_path));
 
-  const auto dependent_schema = root_ / "workspace_prism_sub.schema.yaml";
-  const auto old_time = fs::last_write_time(dependent_schema);
-  WriteDependentSchema("cd");
-  fs::last_write_time(dependent_schema, old_time + std::chrono::seconds(2));
+  const auto second_schema = root_ / "workspace_prism_sub.schema.yaml";
+  const auto old_time = fs::last_write_time(second_schema);
+  WriteSecondSchema("cd");
+  fs::last_write_time(second_schema, old_time + std::chrono::seconds(2));
   EXPECT_FALSE(update.Run(&deployer_));
   EXPECT_EQ(last_build, fs::last_write_time(shared_path));
   Prism shared(shared_path);

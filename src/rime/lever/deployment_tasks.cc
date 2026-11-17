@@ -216,16 +216,19 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
     return false;
   const bool rewrite_workspace_started =
       RewriteCompiler::BeginWorkspace(deployer);
+  auto abort_workspace = [&] {
+    if (rewrite_workspace_started)
+      RewriteCompiler::AbortWorkspace(deployer);
+    return false;
+  };
 
   LOG(INFO) << "updating schemas.";
   int success = 0;
   int failure = 0;
-  map<string, path> schemas;
+  set<string> seen_schemas;
   vector<string> active_schema_ids;
   vector<pair<string, the<Config>>> prepared_schemas;
-  map<string, vector<string>> schema_units;
   map<string, set<string>> unit_owners;
-  vector<pair<string, string>> schema_dependencies;
   vector<CompileUnit> units;
   struct DictionaryBuild {
     an<DictCompiler::DictionarySpec> definition;
@@ -239,45 +242,39 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
   };
   map<string, DictionaryBuild> dictionary_builds;
   map<string, PrismBuild> prism_builds;
-  bool build_plan_valid = true;
   auto schema_component = Config::Require("schema");
   the<ResourceResolver> resolver(Service::instance().CreateResourceResolver(
       {"schema_source_file", "", ".schema.yaml"}));
   the<ResourceResolver> compiled_resolver(
       Service::instance().CreateDeployedResourceResolver(
           {"compiled_schema", "", ".schema.yaml"}));
-  auto build_schema = [&](const string& schema_id, bool as_dependency = false) {
-    if (schemas.find(schema_id) != schemas.end())
-      return;
+  for (const auto& item : *schema_list) {
+    auto entry = As<ConfigMap>(item);
+    auto schema_property = entry ? entry->GetValue("schema") : nullptr;
+    if (!schema_property)
+      continue;
+    const string& schema_id = schema_property->str();
+    if (!seen_schemas.insert(schema_id).second)
+      continue;
     const path schema_path = resolver->ResolvePath(schema_id);
-    schemas[schema_id] = schema_path;
     if (schema_path.empty() || !fs::exists(schema_path)) {
-      if (as_dependency) {
-        LOG(WARNING) << "missing input schema; skipped unsatisfied dependency: "
-                     << schema_id;
-      } else {
-        LOG(ERROR) << "missing input schema: " << schema_id;
-        ++failure;
-      }
-      return;
+      LOG(ERROR) << "missing input schema: " << schema_id;
+      ++failure;
+      continue;
     }
     ConfigFileUpdate update(schema_id + ".schema.yaml", "schema/version");
     if (!update.Run(deployer)) {
       ++failure;
-      return;
+      continue;
     }
     the<Config> schema_config(schema_component->Create(schema_id));
     vector<DictCompiler::DictionarySpec> definitions;
     if (!schema_config ||
         !DictCompiler::ReadDictionarySpecs(schema_config.get(), &definitions)) {
       ++failure;
-      return;
+      continue;
     }
     const path compiled_schema = compiled_resolver->ResolvePath(schema_id);
-    auto use_unit = [&](const string& id) {
-      schema_units[schema_id].push_back(id);
-      unit_owners[id].insert(schema_id);
-    };
     for (const auto& definition : definitions) {
       auto existing = dictionary_builds.find(definition.name);
       if (existing == dictionary_builds.end()) {
@@ -305,12 +302,11 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
         LOG(ERROR) << "conflicting packs for dictionary '" << definition.name
                    << "' in schemas '" << existing->second.schema << "' and '"
                    << schema_id << "'";
-        build_plan_valid = false;
-        return;
+        return abort_workspace();
       }
       auto& build = existing->second;
       auto& unit = units[build.unit];
-      use_unit(unit.id());
+      unit_owners[unit.id()].insert(schema_id);
       for (const auto& prism : definition.prisms) {
         const string output =
             path(prism.first + ".prism.bin").filename().to_utf8_string();
@@ -324,15 +320,14 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
           LOG(ERROR) << "conflicting prism '" << output << "' in schemas '"
                      << owner->second.schema << "' and '" << schema_id
                      << "'; use distinct algebra group names";
-          build_plan_valid = false;
-          return;
+          return abort_workspace();
         }
       }
     }
     vector<pair<string, an<ConfigList>>> auxiliary;
     if (!DictCompiler::ReadAuxiliarySpecs(schema_config.get(), &auxiliary)) {
       ++failure;
-      return;
+      continue;
     }
     if (!auxiliary.empty()) {
       string source;
@@ -345,61 +340,21 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
       for (const auto& group : auxiliary)
         unit.AddOutput(
             path(group.first + ".aux.bin").filename().to_utf8_string());
-      use_unit(unit.id());
+      unit_owners[unit.id()].insert(schema_id);
       units.push_back(std::move(unit));
     }
     active_schema_ids.push_back(schema_id);
     prepared_schemas.emplace_back(schema_id, std::move(schema_config));
-  };
-  for (auto it = schema_list->begin(); it != schema_list->end(); ++it) {
-    auto item = As<ConfigMap>(*it);
-    if (!item)
-      continue;
-    auto schema_property = item->GetValue("schema");
-    if (!schema_property)
-      continue;
-    const string& schema_id = schema_property->str();
-    build_schema(schema_id);
-    the<Config> schema_config(schema_component->Create(schema_id));
-    if (!schema_config)
-      continue;
-    if (auto dependencies = schema_config->GetList("schema/dependencies")) {
-      for (auto d = dependencies->begin(); d != dependencies->end(); ++d) {
-        auto dependency = As<ConfigValue>(*d);
-        if (!dependency)
-          continue;
-        const string& dependency_id = dependency->str();
-        bool as_dependency = true;
-        build_schema(dependency_id, as_dependency);
-        schema_dependencies.emplace_back(schema_id, dependency_id);
-      }
-    }
   }
   CompileGraph graph;
   for (auto& unit : units) {
-    if (!graph.AddUnit(std::move(unit))) {
-      build_plan_valid = false;
-      break;
-    }
-  }
-  if (!build_plan_valid) {
-    if (rewrite_workspace_started)
-      RewriteCompiler::AbortWorkspace(deployer);
-    return false;
-  }
-  for (const auto& [schema, dependency] : schema_dependencies) {
-    for (const auto& prerequisite : schema_units[schema]) {
-      for (const auto& dependent : schema_units[dependency])
-        graph.AddDependency(prerequisite, dependent);
-    }
+    if (!graph.AddUnit(std::move(unit)))
+      return abort_workspace();
   }
   CompileScheduler scheduler;
   auto result = scheduler.Run(graph);
-  if (!result) {
-    if (rewrite_workspace_started)
-      RewriteCompiler::AbortWorkspace(deployer);
-    return false;
-  }
+  if (!result)
+    return abort_workspace();
   set<string> failed_schemas;
   for (const auto& unit : result->failed_units) {
     const auto& owners = unit_owners.at(unit);
