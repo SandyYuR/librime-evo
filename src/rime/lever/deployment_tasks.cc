@@ -174,6 +174,20 @@ bool InstallationUpdate::Run(Deployer* deployer) {
   return config.SaveToFile(installation_info);
 }
 
+static bool SamePrismAlgebra(const an<ConfigList>& first,
+                             const an<ConfigList>& second) {
+  const size_t size = first ? first->size() : 0;
+  if (size != (second ? second->size() : 0))
+    return false;
+  for (size_t i = 0; i < size; ++i) {
+    auto a = As<ConfigValue>(first->GetAt(i));
+    auto b = As<ConfigValue>(second->GetAt(i));
+    if (!a || !b || a->str() != b->str())
+      return false;
+  }
+  return true;
+}
+
 bool WorkspaceUpdate::Run(Deployer* deployer) {
   LOG(INFO) << "updating workspace.";
   {
@@ -210,8 +224,22 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
   vector<string> active_schema_ids;
   vector<pair<string, the<Config>>> prepared_schemas;
   map<string, vector<string>> schema_units;
-  map<string, string> unit_owners;
-  CompileGraph graph;
+  map<string, set<string>> unit_owners;
+  vector<pair<string, string>> schema_dependencies;
+  vector<CompileUnit> units;
+  struct DictionaryBuild {
+    an<DictCompiler::DictionarySpec> definition;
+    size_t unit;
+    string schema;
+  };
+  struct PrismBuild {
+    string dictionary;
+    string schema;
+    an<ConfigList> algebra;
+  };
+  map<string, DictionaryBuild> dictionary_builds;
+  map<string, PrismBuild> prism_builds;
+  bool build_plan_valid = true;
   auto schema_component = Config::Require("schema");
   the<ResourceResolver> resolver(Service::instance().CreateResourceResolver(
       {"schema_source_file", "", ".schema.yaml"}));
@@ -246,33 +274,59 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
       return;
     }
     const path compiled_schema = compiled_resolver->ResolvePath(schema_id);
-    auto add_unit = [&](CompileUnit unit) {
-      const string id = unit.id();
-      if (!graph.AddUnit(std::move(unit)))
-        return false;
+    auto use_unit = [&](const string& id) {
       schema_units[schema_id].push_back(id);
-      unit_owners[id] = schema_id;
-      return true;
+      unit_owners[id].insert(schema_id);
     };
     for (const auto& definition : definitions) {
-      const uint64_t estimated = DictCompiler::EstimateMemory(
-          definition.name, false, definition.packs);
-      CompileUnit unit(schema_id + ":dictionary:" + definition.name, estimated,
-                       [definition, compiled_schema]() {
-                         return DictCompiler::CompileDictionary(
-                             definition, compiled_schema);
-                       });
-      auto output = [&](const string& name) {
-        unit.AddOutput(path(name).filename().to_utf8_string());
-      };
-      output(definition.name + ".table.bin");
-      output(definition.name + ".reverse.bin");
-      output(definition.name + ".packs.table.bin");
-      for (const auto& prism : definition.prisms)
-        output(prism.first + ".prism.bin");
-      if (!add_unit(std::move(unit))) {
-        ++failure;
+      auto existing = dictionary_builds.find(definition.name);
+      if (existing == dictionary_builds.end()) {
+        auto shared = New<DictCompiler::DictionarySpec>();
+        shared->name = definition.name;
+        shared->packs = definition.packs;
+        existing =
+            dictionary_builds
+                .emplace(definition.name,
+                         DictionaryBuild{shared, units.size(), schema_id})
+                .first;
+        units.emplace_back(schema_id + ":dictionary:" + definition.name,
+                           DictCompiler::EstimateMemory(definition.name, false,
+                                                        definition.packs),
+                           [shared, compiled_schema]() {
+                             return DictCompiler::CompileDictionary(
+                                 *shared, compiled_schema);
+                           });
+        for (const char* suffix :
+             {".table.bin", ".reverse.bin", ".packs.table.bin"}) {
+          units.back().AddOutput(
+              path(definition.name + suffix).filename().to_utf8_string());
+        }
+      } else if (existing->second.definition->packs != definition.packs) {
+        LOG(ERROR) << "conflicting packs for dictionary '" << definition.name
+                   << "' in schemas '" << existing->second.schema << "' and '"
+                   << schema_id << "'";
+        build_plan_valid = false;
         return;
+      }
+      auto& build = existing->second;
+      auto& unit = units[build.unit];
+      use_unit(unit.id());
+      for (const auto& prism : definition.prisms) {
+        const string output =
+            path(prism.first + ".prism.bin").filename().to_utf8_string();
+        const auto [owner, added] = prism_builds.emplace(
+            output, PrismBuild{definition.name, schema_id, prism.second});
+        if (added) {
+          build.definition->prisms.push_back(prism);
+          unit.AddOutput(output);
+        } else if (owner->second.dictionary != definition.name ||
+                   !SamePrismAlgebra(owner->second.algebra, prism.second)) {
+          LOG(ERROR) << "conflicting prism '" << output << "' in schemas '"
+                     << owner->second.schema << "' and '" << schema_id
+                     << "'; use distinct algebra group names";
+          build_plan_valid = false;
+          return;
+        }
       }
     }
     vector<pair<string, an<ConfigList>>> auxiliary;
@@ -291,10 +345,8 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
       for (const auto& group : auxiliary)
         unit.AddOutput(
             path(group.first + ".aux.bin").filename().to_utf8_string());
-      if (!add_unit(std::move(unit))) {
-        ++failure;
-        return;
-      }
+      use_unit(unit.id());
+      units.push_back(std::move(unit));
     }
     active_schema_ids.push_back(schema_id);
     prepared_schemas.emplace_back(schema_id, std::move(schema_config));
@@ -319,11 +371,26 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
         const string& dependency_id = dependency->str();
         bool as_dependency = true;
         build_schema(dependency_id, as_dependency);
-        for (const auto& prerequisite : schema_units[schema_id]) {
-          for (const auto& dependent : schema_units[dependency_id])
-            graph.AddDependency(prerequisite, dependent);
-        }
+        schema_dependencies.emplace_back(schema_id, dependency_id);
       }
+    }
+  }
+  CompileGraph graph;
+  for (auto& unit : units) {
+    if (!graph.AddUnit(std::move(unit))) {
+      build_plan_valid = false;
+      break;
+    }
+  }
+  if (!build_plan_valid) {
+    if (rewrite_workspace_started)
+      RewriteCompiler::AbortWorkspace(deployer);
+    return false;
+  }
+  for (const auto& [schema, dependency] : schema_dependencies) {
+    for (const auto& prerequisite : schema_units[schema]) {
+      for (const auto& dependent : schema_units[dependency])
+        graph.AddDependency(prerequisite, dependent);
     }
   }
   CompileScheduler scheduler;
@@ -334,8 +401,10 @@ bool WorkspaceUpdate::Run(Deployer* deployer) {
     return false;
   }
   set<string> failed_schemas;
-  for (const auto& unit : result->failed_units)
-    failed_schemas.insert(unit_owners.at(unit));
+  for (const auto& unit : result->failed_units) {
+    const auto& owners = unit_owners.at(unit);
+    failed_schemas.insert(owners.begin(), owners.end());
+  }
   for (const auto& schema : prepared_schemas) {
     if (failed_schemas.count(schema.first))
       ++failure;

@@ -29,11 +29,11 @@ static Editor::ActionDef editor_action_definitions[] = {
     {"revert", &Editor::RevertLastEdit},
     {"back", &Editor::BackToPreviousInput},
     {"back_syllable", &Editor::BackToPreviousSyllable},
-    {"delete_candidate", &Editor::DeleteCandidate},
+    {"delete_candidate", &Editor::ResetAutoLearning},
     {"manual_up", &Editor::ManualUp},
     {"manual_down", &Editor::ManualDown},
-    {"auto_delete", &Editor::DeleteCandidate},
-    {"manual_delete", &Editor::ManualDel},
+    {"auto_delete", &Editor::ResetAutoLearning},
+    {"manual_delete", &Editor::ResetManualOrder},
     {"delete", &Editor::DeleteChar},
     {"cancel", &Editor::CancelComposition},
     Editor::kActionNoop};
@@ -181,12 +181,12 @@ bool Editor::ManualDown(Context* ctx) {
                                     user_rank::EditAction::kMoveDown);
 }
 
-bool Editor::ManualDel(Context* ctx) {
+bool Editor::ResetManualOrder(Context* ctx) {
   return user_rank::ApplyEditAction(engine_, ctx,
                                     user_rank::EditAction::kResetManual);
 }
 
-bool Editor::DeleteCandidate(Context* ctx) {
+bool Editor::ResetAutoLearning(Context* ctx) {
   ctx->DeleteCurrentSelection();
   return true;
 }
@@ -223,9 +223,8 @@ FluidEditor::FluidEditor(const Ticket& ticket) : Editor(ticket, false) {
   keymap.Bind({XK_Return, kShiftMask}, &Editor::CommitScriptText);  //
   keymap.Bind({XK_Return, kControlMask | kShiftMask}, &Editor::CommitComment);
   keymap.Bind({XK_Delete, 0}, &Editor::DeleteChar);
-  // Ctrl+Delete 删除用户词，Shift+Delete 清除手排。
-  keymap.Bind({XK_Delete, kControlMask}, &Editor::DeleteCandidate);
-  keymap.Bind({XK_Delete, kShiftMask}, &Editor::ManualDel);
+  keymap.Bind({XK_Delete, kControlMask}, &Editor::ResetAutoLearning);
+  keymap.Bind({XK_Delete, kShiftMask}, &Editor::ResetManualOrder);
   // Ctrl+上下移动候选，Shift+上下保留导航功能。
   keymap.Bind({XK_Up, kControlMask}, &Editor::ManualUp);
   keymap.Bind({XK_Down, kControlMask}, &Editor::ManualDown);
@@ -243,9 +242,8 @@ ExpressEditor::ExpressEditor(const Ticket& ticket) : Editor(ticket, true) {
   keymap.Bind({XK_Return, kControlMask}, &Editor::CommitScriptText);  //
   keymap.Bind({XK_Return, kControlMask | kShiftMask}, &Editor::CommitComment);
   keymap.Bind({XK_Delete, 0}, &Editor::DeleteChar);
-  // Ctrl+Delete 删除用户词，Shift+Delete 清除手排。
-  keymap.Bind({XK_Delete, kControlMask}, &Editor::DeleteCandidate);
-  keymap.Bind({XK_Delete, kShiftMask}, &Editor::ManualDel);
+  keymap.Bind({XK_Delete, kControlMask}, &Editor::ResetAutoLearning);
+  keymap.Bind({XK_Delete, kShiftMask}, &Editor::ResetManualOrder);
   // Ctrl+上下移动候选，Shift+上下保留导航功能。
   keymap.Bind({XK_Up, kControlMask}, &Editor::ManualUp);
   keymap.Bind({XK_Down, kControlMask}, &Editor::ManualDown);
