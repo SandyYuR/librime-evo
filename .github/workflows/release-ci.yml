@@ -11,16 +11,18 @@ on:
 jobs:
   linux:
     uses: ./.github/workflows/linux-build.yml
+    with:
+      rime_plugins: amzxyz/librime-evo-octagram rime/librime-predict
 
   macos:
     uses: ./.github/workflows/macos-build.yml
     with:
-      rime_plugins: lotem/librime-octagram rime/librime-predict
+      rime_plugins: amzxyz/librime-evo-octagram rime/librime-predict
 
   windows:
     uses: ./.github/workflows/windows-build.yml
     with:
-      rime_plugins: lotem/librime-octagram rime/librime-predict
+      rime_plugins: amzxyz/librime-evo-octagram rime/librime-predict
 
   release:
     needs: [macos, windows]
