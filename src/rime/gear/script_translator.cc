@@ -683,20 +683,23 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
   if (user_phrase_)
     user_phrase_iter_ = user_phrase_->rbegin();
 
-  auto is_correction_match = [&](auto& iter_pair, size_t len) {
+  auto is_unreliable_match = [&](auto& iter_pair, size_t len) {
     if (iter_pair.first != len || iter_pair.second.exhausted())
       return false;
     const auto entry = iter_pair.second.Peek();
-    return entry && syllabifier_->IsCorrection(entry->code, len);
+    // Abbreviated AUX may consume ordinary syllables; keep sentence-making
+    // available for those ordinary paths, just as for correction matches.
+    return entry && (entry->abbreviated_auxiliary ||
+                     syllabifier_->IsCorrection(entry->code, len));
   };
 
   bool has_reliable_phrase =
       has_exact_match_phrase(phrase_, phrase_iter_, consumed) &&
-      !is_correction_match(*phrase_iter_, consumed);
+      !is_unreliable_match(*phrase_iter_, consumed);
 
   bool has_reliable_user_phrase =
       has_exact_match_phrase(user_phrase_, user_phrase_iter_, consumed) &&
-      !is_correction_match(*user_phrase_iter_, consumed);
+      !is_unreliable_match(*user_phrase_iter_, consumed);
 
   bool has_at_least_two_syllables = syllable_graph.edges.size() >= 2;
   DLOG(INFO) << "consumed: " << consumed

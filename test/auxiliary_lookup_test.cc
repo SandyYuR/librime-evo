@@ -48,6 +48,12 @@ sort: by_weight
 加	jia	100
 哀	ai	100
 爱	ai	10
+最	zui	241723
+嘴	zui	10503
+快	kuai	93223
+的	de	48288412
+最快	zui kuai	18413
+嘴的	zui de	933
 你好	ni hao	100
 拟好	ni hao	10
 泥蒿	ni hao	5
@@ -70,6 +76,8 @@ sort: by_weight
 锃	jw
 哀	wy
 里	zt
+嘴	ky
+嘴	kuai
 )YAML";
     std::ofstream("aux_path_test.schema.yaml") << R"YAML(build:
   dictionaries:
@@ -82,6 +90,8 @@ sort: by_weight
           - xform/^lin$/ln/
           - xform/^zeng$/zg/
           - xform/^jia$/jw/
+          - xform/^zui$/zv/
+          - xform/^kuai$/ky/
   auxiliary:
     dictionary: aux_path_test_aux
     algebra:
@@ -504,6 +514,58 @@ TEST_F(RimeAuxiliaryLookupTest,
     ASSERT_TRUE(original.Skip(1));
     EXPECT_EQ(vector<string>(expected.begin() + 1, expected.end()),
               drain(original));
+  }
+}
+
+TEST_F(RimeAuxiliaryLookupTest,
+       AbbreviatedAuxiliaryPhraseDoesNotSuppressSentenceMaking) {
+  for (const string type : {"zrm", "pinyin"}) {
+    for (int max_sentences : {1, 3}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "prism=" << type << " max_sentences=" << max_sentences);
+      auto config = std::make_unique<Config>();
+      ASSERT_TRUE(config->LoadFromFile(path{"aux_path_test.schema.yaml"}));
+      std::istringstream settings(R"YAML(engine:
+  segmentors: [abc_segmentor, fallback_segmentor]
+  translators: [script_translator]
+speller:
+  alphabet: abcdefghijklmnopqrstuvwxyz/
+translator:
+  dictionary: aux_path_test
+  aux: aux_path_test
+  enable_direct_aux: true
+  user_dict_mode: off
+  enable_completion: false
+)YAML");
+      Config input;
+      ASSERT_TRUE(input.LoadFromStream(settings));
+      for (const string key : {"engine", "speller", "translator"})
+        ASSERT_TRUE(config->SetItem(key, input.GetItem(key)));
+      ASSERT_TRUE(config->SetString("translator/prism", type));
+      ASSERT_TRUE(config->SetInt("translator/max_sentences", max_sentences));
+      the<Engine> engine(Engine::Create());
+      engine->ApplySchema(new Schema("aux_sentence_test", config.release()));
+      auto* context = engine->context();
+      auto query = [&](const string& raw, const string& expected,
+                       bool sentence) {
+        context->Clear();
+        context->set_input(raw);
+        auto candidate = context->GetSelectedCandidate();
+        ASSERT_TRUE(candidate);
+        EXPECT_EQ(expected, candidate->text());
+        EXPECT_EQ(raw.size(), candidate->end());
+        EXPECT_EQ(sentence, candidate->type() == "sentence");
+      };
+      const string base = type == "zrm" ? "zv" : "zui";
+      const string tail = type == "zrm" ? "ky" : "kuai";
+      const string phrase = base + tail;
+      // A complete phrase reached through weak AUX must not hide the ordinary
+      // path that needs sentence-making to produce its final word.
+      query(phrase + "de", "最快的", true);
+      query(phrase, "最快", false);
+      // Explicit non-abbreviated AUX remains a reliable full phrase match.
+      query(phrase + "/de", "嘴的", false);
+    }
   }
 }
 
