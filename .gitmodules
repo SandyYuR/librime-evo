@@ -13,3 +13,7 @@
 [submodule "deps/spdlog"]
 	path = deps/spdlog
 	url = https://github.com/gabime/spdlog.git
+[submodule "plugins/lua"]
+	path = plugins/lua
+	url = https://github.com/amzxyz/librime-evo-lua.git
+	branch = main

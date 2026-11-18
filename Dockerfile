@@ -20,6 +20,10 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update \
 WORKDIR /librime
 COPY . .
 
+# Git metadata is excluded from the image; pass the release label separately.
+ARG LUAJIT_RELVER=ROLLING
+RUN printf '%s\n' "$LUAJIT_RELVER" > plugins/lua/thirdparty/luajit/.relver
+
 RUN bash install-plugins.sh \
   rime/librime-charcode \
   lotem/librime-octagram \
@@ -31,6 +35,6 @@ RUN cmake -B build -G Ninja \
   -DBUILD_TEST:BOOL=ON \
   -DBUILD_STATIC:BOOL=OFF \
   -DBUILD_SHARED_LIBS:BOOL=ON
-RUN cmake --build build
+RUN cmake --build build -j2
 
 RUN ctest --test-dir build --output-on-failure

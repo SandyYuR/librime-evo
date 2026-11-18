@@ -11,6 +11,8 @@ jobs:
     - name: Checkout last commit
       uses: actions/checkout@v7
       with:
-        submodules: true
+        submodules: recursive
     - name: Build with plugins
-      run: docker build -t librime .
+      run: |
+        luajit_release=$(git -C plugins/lua/thirdparty/luajit log -1 --format=%ct)
+        docker build --build-arg LUAJIT_RELVER="$luajit_release" -t librime .

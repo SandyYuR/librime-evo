@@ -38,7 +38,6 @@ jobs:
           submodules: recursive
 
       - name: Configure MSVC toolchain
-        if: ${{ matrix.compiler == 'msvc' || matrix.arch == 'arm64' }}
         uses: TheMrMilchmann/setup-msvc-dev@v4
         with:
           arch: ${{ matrix.cross_arch || matrix.arch }}
@@ -75,7 +74,7 @@ jobs:
         run: |
           $git_ref_name = git describe --always
           echo "git_ref_name=$git_ref_name" >> $env:GITHUB_ENV
-          git submodule > submodule-status
+          git submodule status -- deps > submodule-status
 
       - name: Install boost
         run: .\install-boost.bat
@@ -149,7 +148,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: ${{ inputs.repository }}
-          submodules: true
+          submodules: recursive
 
       - name: Configure build environment
         run: |

@@ -47,7 +47,7 @@ jobs:
         run: ./install-boost.sh
 
       - name: Check submodules
-        run: git submodule > submodule-status
+        run: git submodule status -- deps > submodule-status
 
       - name: Cache dependencies
         id: cache-deps

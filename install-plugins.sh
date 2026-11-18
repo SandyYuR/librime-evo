@@ -29,6 +29,17 @@ do
     fi
     plugin_project="${slug##*/}"
     plugin_dir="plugins/${plugin_project#librime-}"
+    if [[ "${slug}" == "amzxyz/librime-evo-lua" ]]; then
+        plugin_dir="plugins/lua"
+    fi
+    if [[ "${plugin_dir}" == "plugins/lua" ]]; then
+        if [[ -e "plugins/lua/.git" ]]; then
+            git -C plugins/lua submodule update --init --recursive
+        else
+            git submodule update --init --recursive -- plugins/lua
+        fi
+        continue
+    fi
     if [[ -d "${plugin_dir}" ]]
     then
         echo "Updating ${plugin} in ${plugin_dir}"

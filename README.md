@@ -130,7 +130,7 @@ Plugins
     deals with character encoding; depends on boost::locale and ICU libraries
   - [librime-legacy](https://github.com/rime/librime-legacy) (Deprecated) Legacy module with
     GPL-licensed code
-  - [librime-lua](https://github.com/hchunhui/librime-lua) Lua scripting
+  - [librime-evo-lua](https://github.com/amzxyz/librime-evo-lua) Lua scripting
   - [librime-octagram](https://github.com/lotem/librime-octagram) Language model
   - [librime-predict](https://github.com/rime/librime-predict) Predict next word
   - [librime-proto](https://github.com/lotem/librime-proto) IPC using CapnProto

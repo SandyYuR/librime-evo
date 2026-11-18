@@ -8,6 +8,8 @@ lib/*
 bin/*
 share/*
 deps/*/*
+plugins/*/
+!plugins/lua/
 env.bat
 node_modules/
 *~
