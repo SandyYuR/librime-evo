@@ -54,6 +54,11 @@ sort: by_weight
 的	de	48288412
 最快	zui kuai	18413
 嘴的	zui de	933
+甲	ab	10000000
+乙	cd	10000
+丙	a	100
+甲乙	ab cd	100
+丙乙	a cd	100
 你好	ni hao	100
 拟好	ni hao	10
 泥蒿	ni hao	5
@@ -78,6 +83,7 @@ sort: by_weight
 里	zt
 嘴	ky
 嘴	kuai
+丙	B
 )YAML";
     std::ofstream("aux_path_test.schema.yaml") << R"YAML(build:
   dictionaries:
@@ -101,6 +107,7 @@ sort: by_weight
         - "aux|^([a-z]{2,})$|$1/|"
         - "aux|^weak$|xy|abbrev"
         - "aux|^norm$|xy|"
+        - "aux|^B$|b|abbrev"
       aux_path_other:
         - "aux|^([a-z])[a-z]*$|$1|"
         - "aux|^([a-z]{2,})$|$1/|"
@@ -116,6 +123,8 @@ sort: by_weight
   void TearDown() override {
     database_.reset();
     std::filesystem::remove_all("aux_path_cache.userdb");
+    std::filesystem::remove_all("aux_path_sentence.userdb");
+    std::filesystem::remove_all("aux_path_prefix.userdb");
     for (const char* file :
          {"aux_path_test.dict.yaml", "aux_path_test_aux.yaml",
           "aux_path_test.schema.yaml", "aux_path_test.table.bin",
@@ -158,6 +167,7 @@ sort: by_weight
       return entries;
     for (auto bucket = result->rbegin(); bucket != result->rend(); ++bucket) {
       auto& it = bucket->second;
+      it.ApplyAuxiliaryOrdering();
       while (!it.exhausted()) {
         entries.push_back(it.Peek());
         it.Next();
@@ -325,6 +335,43 @@ TEST_F(RimeAuxiliaryLookupTest, AbbreviationKeepsPenaltyAndCharacterOrdering) {
   EXPECT_LT(Position(entries, "增加"), Position(entries, "锃"));
   EXPECT_LT(Position(entries, "增价"), Position(entries, "锃"));
   EXPECT_TRUE(entries[Position(entries, "锃")]->abbreviated_auxiliary);
+}
+
+TEST_F(RimeAuxiliaryLookupTest,
+       SearchOrderIsIndependentOfAuxiliaryDisplayOrder) {
+  auto dict = OpenDictionary("pinyin");
+  AuxiliaryMatcher matcher(dict.get(), database_.get());
+  Syllabifier syllabifier(" '", false);
+  syllabifier.SetAuxiliaryLookup(
+      [&matcher](const string& code, vector<AuxGraphMatch>* matches) {
+        matcher.Lookup(code, matches);
+      });
+  SyllableGraph graph;
+  syllabifier.BuildSyllableGraph("abcdde", *dict->prism(), &graph);
+  auto result = dict->Lookup(graph, 0);
+  ASSERT_TRUE(result);
+  auto bucket = result->find(4);
+  ASSERT_NE(result->end(), bucket);
+  auto& search = bucket->second;
+  ASSERT_TRUE(search.Peek());
+  EXPECT_EQ("甲乙", search.Peek()->text);
+  EXPECT_FALSE(search.Peek()->abbreviated_auxiliary);
+
+  auto display = search.Fork();
+  display.ApplyAuxiliaryOrdering();
+  ASSERT_TRUE(display.Peek());
+  EXPECT_EQ("丙乙", display.Peek()->text);
+  EXPECT_TRUE(display.Peek()->abbreviated_auxiliary);
+  EXPECT_LT(display.Peek()->weight, search.Peek()->weight);
+  EXPECT_EQ("甲乙", search.Peek()->text);
+
+  auto filtered = search.Fork();
+  filtered.AddFilter([](an<DictEntry> entry) { return entry->text != "丙乙"; });
+  filtered.ApplyAuxiliaryOrdering();
+  ASSERT_TRUE(filtered.Peek());
+  EXPECT_EQ("甲乙", filtered.Peek()->text);
+  EXPECT_EQ(1u, filtered.entry_count());
+  EXPECT_FALSE(filtered.Next());
 }
 
 TEST_F(RimeAuxiliaryLookupTest, SameSpellingKeepsSeparateAuxiliaryMetadata) {
@@ -502,6 +549,7 @@ TEST_F(RimeAuxiliaryLookupTest,
     auto bucket = collector->find(input.size());
     ASSERT_NE(collector->end(), bucket);
     auto& original = bucket->second;
+    original.ApplyAuxiliaryOrdering();
     DictEntryIterator copy(original);
     DictEntryIterator assigned;
     assigned = original;
@@ -520,9 +568,11 @@ TEST_F(RimeAuxiliaryLookupTest,
 TEST_F(RimeAuxiliaryLookupTest,
        AbbreviatedAuxiliaryPhraseDoesNotSuppressSentenceMaking) {
   for (const string type : {"zrm", "pinyin"}) {
-    for (int max_sentences : {1, 3}) {
+    for (auto [max_sentences, max_homophones] :
+         {std::pair{1, 1}, std::pair{3, 8}}) {
       SCOPED_TRACE(::testing::Message()
-                   << "prism=" << type << " max_sentences=" << max_sentences);
+                   << "prism=" << type << " max_sentences=" << max_sentences
+                   << " max_homophones=" << max_homophones);
       auto config = std::make_unique<Config>();
       ASSERT_TRUE(config->LoadFromFile(path{"aux_path_test.schema.yaml"}));
       std::istringstream settings(R"YAML(engine:
@@ -543,6 +593,7 @@ translator:
         ASSERT_TRUE(config->SetItem(key, input.GetItem(key)));
       ASSERT_TRUE(config->SetString("translator/prism", type));
       ASSERT_TRUE(config->SetInt("translator/max_sentences", max_sentences));
+      ASSERT_TRUE(config->SetInt("translator/max_homophones", max_homophones));
       the<Engine> engine(Engine::Create());
       engine->ApplySchema(new Schema("aux_sentence_test", config.release()));
       auto* context = engine->context();
@@ -565,7 +616,58 @@ translator:
       query(phrase, "最快", false);
       // Explicit non-abbreviated AUX remains a reliable full phrase match.
       query(phrase + "/de", "嘴的", false);
+      // A weak AUX head does not hide the ordinary exact word behind it.
+      query("abcd", "丙乙", false);
+      // Display priority must not evict the ordinary path at max_homophones=1.
+      query("abcdde", "甲乙的", true);
+      if (type == "zrm")
+        query("zgjwde", "增加的", true);
     }
+  }
+}
+
+TEST_F(RimeAuxiliaryLookupTest, UserAuxiliaryPriorityKeepsOrdinaryMatches) {
+  for (bool complete_phrase : {false, true}) {
+    SCOPED_TRACE(complete_phrase ? "complete user phrase" : "user prefix");
+    const string user_name =
+        complete_phrase ? "aux_path_sentence" : "aux_path_prefix";
+    {
+      UserDbWrapper<LevelDb> db(path{user_name + ".userdb"}, user_name);
+      ASSERT_TRUE(db.Open());
+      if (complete_phrase) {
+        ASSERT_TRUE(db.Update("a de \t丙的", "1,1,1,1,1"));
+        ASSERT_TRUE(db.Update("ab de \t甲的", "1,1,1,0,0"));
+      } else {
+        ASSERT_TRUE(db.Update("a \t丙", "1,1,1,1,1"));
+      }
+      ASSERT_TRUE(db.Close());
+    }
+    auto config = std::make_unique<Config>();
+    ASSERT_TRUE(config->LoadFromFile(path{"aux_path_test.schema.yaml"}));
+    std::istringstream settings(R"YAML(engine:
+  segmentors: [abc_segmentor, fallback_segmentor]
+  translators: [script_translator]
+translator:
+  dictionary: aux_path_test
+  prism: pinyin
+  aux: aux_path_test
+  enable_direct_aux: true
+  user_dict_mode: auto
+  enable_completion: false
+)YAML");
+    Config input;
+    ASSERT_TRUE(input.LoadFromStream(settings));
+    for (const string key : {"engine", "translator"})
+      ASSERT_TRUE(config->SetItem(key, input.GetItem(key)));
+    ASSERT_TRUE(config->SetString("translator/user_dict", user_name));
+    the<Engine> engine(Engine::Create());
+    engine->ApplySchema(new Schema("aux_user_sentence_test", config.release()));
+    engine->context()->set_input("abde");
+    auto candidate = engine->context()->GetSelectedCandidate();
+    ASSERT_TRUE(candidate);
+    EXPECT_EQ(complete_phrase ? "丙的" : "甲的", candidate->text());
+    EXPECT_EQ(complete_phrase ? "user_phrase" : "sentence", candidate->type());
+    EXPECT_EQ(4u, candidate->end());
   }
 }
 

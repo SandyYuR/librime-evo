@@ -35,7 +35,8 @@ class RIME_DLL DictEntryIterator : public DictEntryFilterBinder {
   void AddChunk(dictionary::Chunk&& chunk);
   void Sort();
   // Keep ordinary candidate order while placing abbreviated AUX entries
-  // before ordinary entries of the same text length.
+  // before ordinary entries of the same text length. For display only;
+  // sentence search uses Lookup()'s matching priority and score order.
   void ApplyAuxiliaryOrdering();
   // A cursor-independent snapshot for rank anchoring; does not advance the live
   // translation.

@@ -100,6 +100,10 @@ static int compare_head_entries(const Chunk& a, const Chunk& b) {
     return a.is_exact_match() ? -1 : 1;
   if (a.remaining_code.length() != b.remaining_code.length())
     return a.remaining_code.length() < b.remaining_code.length() ? -1 : 1;
+  // A weak AUX interpretation is a fallback when ordinary matches cover the
+  // same span. Its word frequency must not displace those matches in search.
+  if (a.abbreviated_auxiliary != b.abbreviated_auxiliary)
+    return a.abbreviated_auxiliary ? 1 : -1;
   const double a_weight = a.credibility + a.entries[a.cursor].weight;
   const double b_weight = b.credibility + b.entries[b.cursor].weight;
   if (a_weight > b_weight)
@@ -319,13 +323,11 @@ void DictEntryIterator::ApplyAuxiliaryOrdering() {
     return;
 
   DictEntryIterator snapshot = Fork();
-  snapshot.filter_ = nullptr;
   vector<an<DictEntry>> entries;
   entries.reserve(entry_count_);
   while (!snapshot.exhausted()) {
-    snapshot.entry_.reset();
     entries.push_back(snapshot.Peek());
-    if (!snapshot.FindNextEntry())
+    if (!snapshot.Next())
       break;
   }
 
@@ -352,12 +354,13 @@ void DictEntryIterator::ApplyAuxiliaryOrdering() {
     for (size_t i = 0; i < auxiliary.size(); ++i)
       auxiliary_by_length[Utf8Length(auxiliary[i]->text)].push_back(i);
     for (const auto& entry : ordinary) {
-      const size_t text_length = Utf8Length(entry->text);
-      auto found = auxiliary_by_length.find(text_length);
-      if (found != auxiliary_by_length.end()) {
-        for (size_t index : found->second)
-          ordered.push_back(std::move(auxiliary[index]));
-        auxiliary_by_length.erase(found);
+      if (!auxiliary_by_length.empty()) {
+        auto found = auxiliary_by_length.find(Utf8Length(entry->text));
+        if (found != auxiliary_by_length.end()) {
+          for (size_t index : found->second)
+            ordered.push_back(std::move(auxiliary[index]));
+          auxiliary_by_length.erase(found);
+        }
       }
       ordered.push_back(entry);
     }
@@ -630,7 +633,6 @@ an<DictEntryCollector> Dictionary::Lookup(const SyllableGraph& syllable_graph,
   // Every returned iterator must contain a candidate after filtering.
   for (auto it = collector->begin(); it != collector->end();) {
     it->second.Sort();
-    it->second.ApplyAuxiliaryOrdering();
     if (blacklist && !blacklist->empty()) {
       it->second.AddFilter([blacklist](an<DictEntry> entry) {
         return entry && !blacklist->count(entry->text);

@@ -175,7 +175,8 @@ class ScriptTranslation : public Translation {
   bool PrepareCandidate();
   template <class QueryResult>
   void EnrollEntries(map<int, DictEntryList>& entries_by_end_pos,
-                     const an<QueryResult>& query_result);
+                     const an<QueryResult>& query_result,
+                     bool auxiliary_fallback = false);
   WordGraph PrepareForMakingSentence(Dictionary* dict,
                                      UserDictionary* user_dict);
   an<Sentence> MakeSentence(Dictionary* dict, UserDictionary* user_dict);
@@ -667,6 +668,12 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
     FilterAuxiliarySuffixEntries(user_phrase_, translator_->auxiliary_matcher(),
                                  auxiliary_suffix_);
   }
+  // Display priority must not affect the candidates admitted to sentence
+  // search.
+  if (phrase_) {
+    for (auto& [end, entries] : *phrase_)
+      entries.ApplyAuxiliaryOrdering();
+  }
   // AUX 过滤后再计算手排位置。
   if (user_dict)
     RankUserPhrases(*dict, phrase_, user_phrase_,
@@ -683,30 +690,37 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
   if (user_phrase_)
     user_phrase_iter_ = user_phrase_->rbegin();
 
-  auto is_unreliable_match = [&](auto& iter_pair, size_t len) {
-    if (iter_pair.first != len || iter_pair.second.exhausted())
+  auto has_reliable_match = [&](const auto& collector, auto iter) {
+    if (!has_exact_match_phrase(collector, iter, consumed))
       return false;
-    const auto entry = iter_pair.second.Peek();
-    // Abbreviated AUX may consume ordinary syllables; keep sentence-making
-    // available for those ordinary paths, just as for correction matches.
-    return entry && (entry->abbreviated_auxiliary ||
-                     syllabifier_->IsCorrection(entry->code, len));
+    auto& entries = iter->second;
+    const auto head = entries.Peek();
+    if (!head->abbreviated_auxiliary)
+      return !syllabifier_->IsCorrection(head->code, consumed);
+    // AUX display order can put a weak match before a reliable exact word.
+    // Inspect the remaining exact matches without advancing the live cursor.
+    auto scan = entries;
+    while (scan.Next()) {
+      const auto entry = scan.Peek();
+      if (!entry->IsExactMatch())
+        break;
+      if (!entry->abbreviated_auxiliary &&
+          !syllabifier_->IsCorrection(entry->code, consumed))
+        return true;
+    }
+    return false;
   };
 
-  bool has_reliable_phrase =
-      has_exact_match_phrase(phrase_, phrase_iter_, consumed) &&
-      !is_unreliable_match(*phrase_iter_, consumed);
-
+  bool has_reliable_phrase = has_reliable_match(phrase_, phrase_iter_);
   bool has_reliable_user_phrase =
-      has_exact_match_phrase(user_phrase_, user_phrase_iter_, consumed) &&
-      !is_unreliable_match(*user_phrase_iter_, consumed);
+      has_reliable_match(user_phrase_, user_phrase_iter_);
 
   bool has_at_least_two_syllables = syllable_graph.edges.size() >= 2;
   DLOG(INFO) << "consumed: " << consumed
              << ", has_reliable_phrase: " << has_reliable_phrase
              << ", has_reliable_user_phrase: " << has_reliable_user_phrase
              << ", has_at_least_two_syllables: " << has_at_least_two_syllables;
-  // make sentences when there is no exact-matching phrase candidate
+  // Make sentences when there is no reliable exact-matching phrase candidate.
   if (has_at_least_two_syllables && !has_reliable_phrase &&
       !has_reliable_user_phrase) {
     if (max_sentences_ > 1)
@@ -916,13 +930,19 @@ bool ScriptTranslation::CheckEmpty() {
 template <class QueryResult>
 void ScriptTranslation::EnrollEntries(
     map<int, DictEntryList>& entries_by_end_pos,
-    const an<QueryResult>& query_result) {
+    const an<QueryResult>& query_result,
+    bool auxiliary_fallback) {
   if (query_result) {
     for (auto& y : *query_result) {
       DictEntryList& homophones = entries_by_end_pos[y.first];
+      if (auxiliary_fallback && !homophones.empty() &&
+          !homophones.front()->abbreviated_auxiliary)
+        continue;
       while (homophones.size() <
                  static_cast<size_t>(translator_->max_homophones()) &&
              !y.second.exhausted()) {
+        if (!auxiliary_fallback && y.second.Peek()->abbreviated_auxiliary)
+          break;
         homophones.push_back(y.second.Peek());
         if (!y.second.Next())
           break;
@@ -949,8 +969,22 @@ WordGraph ScriptTranslation::PrepareForMakingSentence(
     if (user_dict)
       RankUserPhrases(*dict, system_results, user_results,
                       user_dict->automatic_learning_enabled(), true);
+    if (syllable_graph.has_auxiliary && user_results) {
+      for (auto& [end, entries] : *user_results) {
+        auto& words = entries.entries();
+        std::stable_partition(words.begin(), words.end(), [](const auto& word) {
+          return !word->abbreviated_auxiliary;
+        });
+      }
+    }
     EnrollEntries(same_start_pos, user_results);
     EnrollEntries(same_start_pos, system_results);
+    // Apply the fallback across both sources so weak user entries cannot crowd
+    // ordinary fixed entries out of the shared homophone budget.
+    if (syllable_graph.has_auxiliary) {
+      EnrollEntries(same_start_pos, user_results, true);
+      EnrollEntries(same_start_pos, system_results, true);
+    }
   }
   return graph;
 }
