@@ -57,6 +57,13 @@ const char* KeypadProcessor::ModeName(Mode mode) {
   return "select";
 }
 KeypadProcessor::KeypadProcessor(const Ticket& ticket) : Processor(ticket) {
+  if (engine_) {
+    update_connection_ =
+        engine_->context()->update_notifier().connect([this](Context* context) {
+          if (context->input().empty())
+            raw_mode_ = false;
+        });
+  }
   if (!ticket.schema || !ticket.schema->config())
     return;
   string mode;
@@ -71,6 +78,9 @@ KeypadProcessor::KeypadProcessor(const Ticket& ticket) : Processor(ticket) {
   else
     LOG(WARNING) << "invalid keypad_processor/mode: " << mode
                  << "; using select.";
+}
+KeypadProcessor::~KeypadProcessor() {
+  update_connection_.disconnect();
 }
 ProcessResult KeypadProcessor::ProcessKeyEvent(const KeyEvent& key_event) {
   Context* context = engine_ ? engine_->context() : nullptr;
@@ -87,8 +97,8 @@ ProcessResult KeypadProcessor::ProcessKeyEvent(const KeyEvent& key_event) {
       raw_mode_ = false;
     else
       MarkInputAsRaw(context);
-    LOG(INFO) << "[keypad-processor] raw backspace action=delete input="
-              << context->input();
+    DLOG(INFO) << "[keypad-processor] raw backspace action=delete input="
+               << context->input();
     return kAccepted;
   }
   if (!IsKeypadDigit(key_event.keycode())) {
@@ -99,8 +109,8 @@ ProcessResult KeypadProcessor::ProcessKeyEvent(const KeyEvent& key_event) {
       if (!context->PushInput(ch))
         return kNoop;
       MarkInputAsRaw(context);
-      LOG(INFO) << "[keypad-processor] raw character=" << ch
-                << " action=append";
+      DLOG(INFO) << "[keypad-processor] raw character=" << ch
+                 << " action=append";
       return kAccepted;
     }
     return kNoop;
@@ -112,18 +122,18 @@ ProcessResult KeypadProcessor::ProcessKeyEvent(const KeyEvent& key_event) {
   const bool composing = context->IsComposing();
   const bool compose = mode_ == kCompose || (mode_ == kAuto && composing);
   if (!compose) {
-    LOG(INFO) << "[keypad-processor] key=" << key_event.repr()
-              << " mode=" << ModeName(mode_) << " composing=" << composing
-              << " action=pass";
+    DLOG(INFO) << "[keypad-processor] key=" << key_event.repr()
+               << " mode=" << ModeName(mode_) << " composing=" << composing
+               << " action=pass";
     return kNoop;
   }
   if (!context->PushInput(digit))
     return kNoop;
   raw_mode_ = true;
   MarkInputAsRaw(context);
-  LOG(INFO) << "[keypad-processor] key=" << key_event.repr()
-            << " mode=" << ModeName(mode_) << " composing=" << composing
-            << " action=compose digit=" << digit;
+  DLOG(INFO) << "[keypad-processor] key=" << key_event.repr()
+             << " mode=" << ModeName(mode_) << " composing=" << composing
+             << " action=compose digit=" << digit;
   return kAccepted;
 }
 }  // namespace rime

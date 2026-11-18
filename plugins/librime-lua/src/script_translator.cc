@@ -50,6 +50,7 @@ namespace ScriptTranslatorReg {
       void set_enable_correction(bool);
 
       void disconnect() {
+        Memory::Disconnect();
         dict_.reset();
         user_dict_.reset();
         language_.reset();

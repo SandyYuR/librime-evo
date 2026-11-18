@@ -348,24 +348,22 @@ void DictEntryIterator::ApplyAuxiliaryOrdering() {
       else
         ordinary.push_back(entries[i]);
     }
-    vector<size_t> auxiliary_lengths;
-    auxiliary_lengths.reserve(auxiliary.size());
-    for (const auto& entry : auxiliary)
-      auxiliary_lengths.push_back(Utf8Length(entry->text));
-    vector<bool> emitted(auxiliary.size(), false);
+    map<size_t, vector<size_t>> auxiliary_by_length;
+    for (size_t i = 0; i < auxiliary.size(); ++i)
+      auxiliary_by_length[Utf8Length(auxiliary[i]->text)].push_back(i);
     for (const auto& entry : ordinary) {
       const size_t text_length = Utf8Length(entry->text);
-      for (size_t i = 0; i < auxiliary.size(); ++i) {
-        if (!emitted[i] && auxiliary_lengths[i] == text_length) {
-          ordered.push_back(auxiliary[i]);
-          emitted[i] = true;
-        }
+      auto found = auxiliary_by_length.find(text_length);
+      if (found != auxiliary_by_length.end()) {
+        for (size_t index : found->second)
+          ordered.push_back(std::move(auxiliary[index]));
+        auxiliary_by_length.erase(found);
       }
       ordered.push_back(entry);
     }
-    for (size_t i = 0; i < auxiliary.size(); ++i) {
-      if (!emitted[i])
-        ordered.push_back(auxiliary[i]);
+    for (auto& entry : auxiliary) {
+      if (entry)
+        ordered.push_back(std::move(entry));
     }
     begin = end;
   }

@@ -119,6 +119,10 @@ Memory::Memory(const Ticket& ticket) : manual_engine_(ticket.engine) {
 }
 
 Memory::~Memory() {
+  Disconnect();
+}
+
+void Memory::Disconnect() {
   commit_connection_.disconnect();
   delete_connection_.disconnect();
   unhandled_key_connection_.disconnect();

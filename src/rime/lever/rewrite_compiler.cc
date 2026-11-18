@@ -448,6 +448,9 @@ vector<string> FindRewriterSections(Config* config) {
 
   for (auto it = filters->begin(); it != filters->end(); ++it) {
     auto value = As<ConfigValue>(*it);
+    if (auto entry = As<ConfigMap>(*it)) {
+      value = entry->GetValue("name");
+    }
     if (!value) {
       continue;
     }

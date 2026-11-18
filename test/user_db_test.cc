@@ -525,6 +525,15 @@ TEST(RimeUserDbManualOrderTest, MoveSelectedWithoutNeighborRecord) {
   EXPECT_EQ(state.position, 2);
   EXPECT_EQ(state.commits, 3);
   EXPECT_GT(state.manual_stamp, 0u);
+  ASSERT_TRUE(user_manual_order::SetManual(&db, "ni ", "泥",
+                                           std::numeric_limits<int>::max()));
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  const string before_rejected_move = value;
+  EXPECT_FALSE(user_manual_order::MoveAdjacent(
+      &db, "ni ", "泥", "", "", std::numeric_limits<int>::max(), 1));
+  ASSERT_TRUE(db.Fetch("ni \t泥", &value));
+  EXPECT_EQ(before_rejected_move, value);
+  EXPECT_FALSE(db.in_transaction());
   ASSERT_TRUE(db.Close());
   ASSERT_TRUE(db.Remove());
 }

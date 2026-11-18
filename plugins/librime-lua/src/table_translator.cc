@@ -56,6 +56,7 @@ namespace TableTranslatorReg {
       void set_enable_sentence(bool);
 
       void disconnect() {
+        Memory::Disconnect();
         dict_.reset();
         user_dict_.reset();
         language_.reset();

@@ -1949,6 +1949,7 @@ namespace MemoryReg {
       uter.reset();
     }
     void disconnect() {
+      Memory::Disconnect();
       dict_.reset();
       user_dict_.reset();
       language_.reset();

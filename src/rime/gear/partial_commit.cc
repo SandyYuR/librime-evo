@@ -152,9 +152,9 @@ bool PartialCommit::CommitPrefix(Context* context, size_t count) {
     rest.erase(0, 1);
   const string committed =
       ConfirmedPrefix(context) + FirstCharacters(candidate->text(), count);
-  LOG(INFO) << "[partial-commit] action=prefix count=" << count
-            << " text=" << candidate->text() << " commit=" << committed
-            << " rest=" << rest;
+  DLOG(INFO) << "[partial-commit] action=prefix count=" << count
+             << " text=" << candidate->text() << " commit=" << committed
+             << " rest=" << rest;
   engine_->CommitText(committed);
   context->Clear();
   if (!rest.empty())
@@ -172,8 +172,8 @@ bool PartialCommit::CommitCharacter(Context* context, bool first) {
   string character = first ? FirstCharacter(text) : LastCharacter(text);
   if (character.empty() || character == text)
     return false;
-  LOG(INFO) << "[partial-commit] action=" << (first ? "first" : "last")
-            << " text=" << text << " commit=" << character;
+  DLOG(INFO) << "[partial-commit] action=" << (first ? "first" : "last")
+             << " text=" << text << " commit=" << character;
   engine_->CommitText(character);
   context->Clear();
   return true;

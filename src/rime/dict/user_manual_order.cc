@@ -36,16 +36,13 @@ bool SaveClock(Db* db, uint64_t version) {
   return db->MetaUpdate("/manual_clock", manual_stamp_codec::Format(version));
 }
 // 同码候选只扫描一次，避免重复遍历。
-bool FindPinnedOwners(Db* db,
-                      const string& code,
-                      int source_position,
-                      int target_position,
-                      string* source_owner,
-                      string* target_owner) {
-  if (!source_owner || !target_owner)
+bool FindPinnedAt(Db* db,
+                  const string& code,
+                  int position,
+                  string* occupant_key) {
+  if (!occupant_key)
     return false;
-  source_owner->clear();
-  target_owner->clear();
+  occupant_key->clear();
   auto cursor = db->Query(code + '\t');
   if (!cursor)
     return false;
@@ -54,28 +51,13 @@ bool FindPinnedOwners(Db* db,
     UserDbState state;
     if (!state.Unpack(value))
       return false;
-    if (!state.has_manual_position())
-      continue;
-    if (state.position == source_position) {
-      if (!source_owner->empty())
+    if (state.has_manual_position() && state.position == position) {
+      if (!occupant_key->empty())
         return false;
-      *source_owner = key;
-    }
-    if (source_position != target_position &&
-        state.position == target_position) {
-      if (!target_owner->empty())
-        return false;
-      *target_owner = key;
+      *occupant_key = key;
     }
   }
   return true;
-}
-bool FindPinnedAt(Db* db,
-                  const string& code,
-                  int position,
-                  string* occupant_key) {
-  string ignored;
-  return FindPinnedOwners(db, code, position, position, occupant_key, &ignored);
 }
 }  // namespace
 
@@ -199,9 +181,10 @@ bool MoveAdjacent(Db* db,
   if (!db || code.empty() || selected.empty() || source_position < 1 ||
       (direction != -1 && direction != 1))
     return false;
-  const int target_position = source_position + direction;
-  if (target_position < 1)
+  const int64_t target = int64_t(source_position) + direction;
+  if (target < 1 || target > std::numeric_limits<int>::max())
     return false;
+  const int target_position = static_cast<int>(target);
   const string source_key = code + '\t' + selected;
 
   auto tx = dynamic_cast<Transactional*>(db);

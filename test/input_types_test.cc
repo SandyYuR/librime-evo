@@ -9,7 +9,10 @@
 #include <rime/config.h>
 #include <rime/context.h>
 #include <rime/engine.h>
+#include <rime/registry.h>
 #include <rime/schema.h>
+#include <rime/translation.h>
+#include <rime/translator.h>
 
 namespace rime {
 namespace {
@@ -48,6 +51,41 @@ TEST_F(InputTypesTest, SelectingInputTypeClearsOtherTypes) {
 
   EXPECT_FALSE(engine_->context()->get_option("pinyin"));
   EXPECT_TRUE(engine_->context()->get_option("zrm"));
+}
+
+class InputTypeQueryCounter : public Translator {
+ public:
+  explicit InputTypeQueryCounter(const Ticket& ticket) : Translator(ticket) {}
+
+  an<Translation> Query(const string& input, const Segment& segment) override {
+    ++queries;
+    return New<UniqueTranslation>(
+        New<SimpleCandidate>("test", segment.start, segment.end, input));
+  }
+
+  inline static size_t queries = 0;
+};
+
+TEST_F(InputTypesTest, SwitchingRecomposesOnceAfterTheRadioGroupSettles) {
+  auto& registry = Registry::instance();
+  registry.Register("input_type_counter", new Component<InputTypeQueryCounter>);
+  auto* schema = engine_->schema();
+  auto* config = schema->config();
+  auto segmentors = New<ConfigList>();
+  segmentors->Append(New<ConfigValue>("abc_segmentor"));
+  config->SetItem("engine/segmentors", segmentors);
+  auto translators = New<ConfigList>();
+  translators->Append(New<ConfigValue>("input_type_counter"));
+  config->SetItem("engine/translators", translators);
+  engine_->ApplySchema(schema);
+  engine_->context()->set_input("ni");
+  InputTypeQueryCounter::queries = 0;
+  engine_->context()->set_option("pinyin", true);
+  EXPECT_EQ(1u, InputTypeQueryCounter::queries);
+  EXPECT_TRUE(engine_->context()->get_option("pinyin"));
+  EXPECT_FALSE(engine_->context()->get_option("zrm"));
+  engine_.reset();
+  registry.Unregister("input_type_counter");
 }
 
 TEST(InputTypesEnabledTest, DisabledOptionCannotBeActivatedOrRestored) {

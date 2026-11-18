@@ -7,6 +7,9 @@
 #include <rime/component.h>
 #include <rime/deployer.h>
 #include <rime/dict/prism.h>
+#include <rime/context.h>
+#include <rime/engine.h>
+#include <rime/gear/rewriter.h>
 #include <rime/lever/deployment_tasks.h>
 #include <rime/service.h>
 #include <rime_api.h>
@@ -236,4 +239,42 @@ TEST_F(RimeWorkspacePrismTest, SharesPrismOnlyWhenAlgebraMatches) {
   ASSERT_TRUE(shared.Load());
   EXPECT_TRUE(shared.HasKey("ab"));
   EXPECT_FALSE(shared.HasKey("cd"));
+}
+
+TEST_F(RimeWorkspacePrismTest, DeploysAndSwitchesConditionalRewriter) {
+  std::ofstream(root_ / "rewrite.tsv") << "你\t妳\n";
+  std::ofstream(root_ / "workspace_prism_main.custom.yaml") << R"YAML(patch:
+  engine/processors: [speller, selector, express_editor]
+  engine/segmentors: [abc_segmentor]
+  engine/translators: [table_translator]
+  engine/filters:
+    - {name: rewriter@rewrite_test, when: rewrite_on}
+  translator:
+    dictionary: workspace_prism
+    prism: shared
+    user_dict_mode: off
+  rewrite_test:
+    files: [rewrite.tsv]
+    option: true
+    mode: replace
+)YAML";
+  WorkspaceUpdate update;
+  ASSERT_TRUE(update.Run(&deployer_));
+
+  auto api = rime_get_api();
+  auto session = api->create_session();
+  ASSERT_NE(0, session);
+  ASSERT_TRUE(api->select_schema(session, "workspace_prism_main"));
+  ASSERT_TRUE(api->process_key(session, 'a', 0));
+  ASSERT_TRUE(api->process_key(session, 'b', 0));
+  auto* context = Service::instance().GetSession(session)->context();
+  ASSERT_TRUE(context->GetSelectedCandidate());
+  EXPECT_EQ("你", context->GetSelectedCandidate()->text());
+  api->set_option(session, "rewrite_on", true);
+  ASSERT_TRUE(context->GetSelectedCandidate());
+  EXPECT_EQ("妳", context->GetSelectedCandidate()->text());
+  api->set_option(session, "rewrite_on", false);
+  ASSERT_TRUE(context->GetSelectedCandidate());
+  EXPECT_EQ("你", context->GetSelectedCandidate()->text());
+  api->destroy_session(session);
 }

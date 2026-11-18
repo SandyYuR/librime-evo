@@ -211,13 +211,16 @@ void ConcreteEngine::OnOptionUpdate(Context* ctx, const string& option) {
     return;
   EnforceInputTypeOption(ctx, option);
   LOG(INFO) << "updated option: " << option;
-  UpdateComponentConditions(processors_, ctx);
-  UpdateComponentConditions(segmentors_, ctx);
-  UpdateComponentConditions(translators_, ctx);
-  UpdateComponentConditions(filters_, ctx);
-  // apply new option to active segment
-  if (ctx->IsComposing()) {
-    ctx->RefreshNonConfirmedComposition();
+  // A radio-group change emits nested option notifications. Recompose after
+  // all members have reached their final values.
+  if (!enforcing_input_type_) {
+    UpdateComponentConditions(processors_, ctx);
+    UpdateComponentConditions(segmentors_, ctx);
+    UpdateComponentConditions(translators_, ctx);
+    UpdateComponentConditions(filters_, ctx);
+    if (ctx->IsComposing()) {
+      ctx->RefreshNonConfirmedComposition();
+    }
   }
   // notification
   bool option_is_on = ctx->get_option(option);

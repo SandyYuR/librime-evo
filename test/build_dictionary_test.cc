@@ -14,10 +14,12 @@
 #include <rime/dict/reverse_lookup_dictionary.h>
 #include <rime/dict/user_dictionary.h>
 #include <rime/engine.h>
+#include <rime/gear/script_translator.h>
 #include <rime/gear/table_translator.h>
 #include <rime/gear/unity_table_encoder.h>
 #include <rime/key_event.h>
 #include <rime/menu.h>
+#include <rime/processor.h>
 #include <rime/segmentation.h>
 #include <rime/lever/deployment_tasks.h>
 #include <rime/service.h>
@@ -424,6 +426,130 @@ TEST_F(RimeSequentialUserPhraseTest, OffDoesNotOpenUserDictionary) {
   ASSERT_NO_FATAL_FAILURE(Press(XK_space));
   EXPECT_EQ("拟好", committed_);
   EXPECT_FALSE(std::filesystem::exists(path{user_db_}));
+}
+
+TEST_F(RimeSequentialUserPhraseTest,
+       DisconnectTransfersWriterAndAbortsOwnedBatch) {
+  ASSERT_NO_FATAL_FAILURE(Start("auto"));
+  Input("ni");
+  auto phrase = As<Phrase>(Candidate::GetGenuineCandidate(
+      engine_->context()->GetSelectedCandidate()));
+  ASSERT_TRUE(phrase);
+  auto* original = Memory::FindManualSource(engine_.get(), phrase->language());
+  ASSERT_TRUE(original);
+  class CallbackTranslator : public ScriptTranslator {
+   public:
+    using ScriptTranslator::ScriptTranslator;
+    bool Memorize(const CommitEntry& entry) override {
+      ++calls;
+      return ScriptTranslator::Memorize(entry);
+    }
+    size_t calls = 0;
+  } replacement(Ticket(engine_.get(), "translator"));
+  EXPECT_EQ(original, replacement.UserDbWriter());
+  ASSERT_TRUE(original->StartSession());
+
+  original->Disconnect();
+  EXPECT_EQ(nullptr,
+            Memory::FindManualSource(engine_.get(), phrase->language()));
+  EXPECT_EQ(&replacement, replacement.UserDbWriter());
+  EXPECT_FALSE(original->user_dict()->write_owner());
+  EXPECT_TRUE(replacement.user_dict()->write_owner());
+  ASSERT_TRUE(replacement.StartSession());
+  original->Disconnect();
+  EXPECT_EQ(&replacement, replacement.UserDbWriter());
+  EXPECT_TRUE(replacement.FinishSession());
+
+  auto& segment = engine_->context()->composition().back();
+  auto translation = replacement.Query("ni", segment);
+  ASSERT_TRUE(translation);
+  segment.menu = New<Menu>();
+  segment.menu->AddTranslation(translation);
+  segment.selected_index = 0;
+  const string selected_text = segment.GetSelectedCandidate()->text();
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  EXPECT_EQ(1u, replacement.calls);
+  EXPECT_TRUE(replacement.FinishSession());
+  UserDbState state;
+  ASSERT_TRUE(Read("ni", selected_text, &state));
+  EXPECT_EQ(1, state.commits);
+}
+
+TEST_F(RimeSequentialUserPhraseTest,
+       ChordSyntheticKeysPreserveExplicitWordCreation) {
+  ASSERT_NO_FATAL_FAILURE(Start("manual"));
+  auto* config = engine_->schema()->config();
+  config->SetString("chord_composer/alphabet", "abc");
+  auto rules = New<ConfigList>();
+  rules->Append(New<ConfigValue>("xform/^ab$/ni/"));
+  rules->Append(New<ConfigValue>("xform/^c$/hao/"));
+  config->SetItem("chord_composer/output_format", rules);
+  the<Processor> chord(Processor::Require("chord_composer")
+                           ->Create(Ticket(engine_.get(), "processor")));
+  ASSERT_TRUE(chord);
+
+  EXPECT_EQ(kAccepted, chord->ProcessKeyEvent(KeyEvent('a', 0)));
+  EXPECT_EQ(kAccepted, chord->ProcessKeyEvent(KeyEvent('b', 0)));
+  EXPECT_TRUE(engine_->context()->input().empty());
+  EXPECT_EQ(kAccepted, chord->ProcessKeyEvent(KeyEvent('b', kReleaseMask)));
+  EXPECT_TRUE(engine_->context()->input().empty());
+  EXPECT_EQ(kAccepted, chord->ProcessKeyEvent(KeyEvent('a', kReleaseMask)));
+  EXPECT_EQ("ni", engine_->context()->input());
+  EXPECT_EQ(kAccepted, chord->ProcessKeyEvent(KeyEvent('c', 0)));
+  EXPECT_EQ(kAccepted, chord->ProcessKeyEvent(KeyEvent('c', kReleaseMask)));
+  EXPECT_EQ("nihao", engine_->context()->input());
+  EXPECT_TRUE(engine_->context()->commit_history().empty());
+
+  ASSERT_NO_FATAL_FAILURE(Select("拟"));
+  ASSERT_NO_FATAL_FAILURE(Press(XK_space));
+  EXPECT_EQ("拟好", committed_);
+  UserDbState state;
+  ASSERT_TRUE(Read("ni hao", "拟好", &state));
+  EXPECT_EQ(1, state.commits);
+  EXPECT_EQ(0u, state.last_tick);
+  EXPECT_EQ(0u, reader_->tick());
+}
+
+TEST_F(RimeSequentialUserPhraseTest,
+       KeypadAndPartialCommitPreserveProcessorChain) {
+  ASSERT_NO_FATAL_FAILURE(Start("manual"));
+  auto* schema = engine_->schema();
+  auto* config = schema->config();
+  auto processors = New<ConfigList>();
+  for (const char* name :
+       {"keypad_processor", "partial_commit", "key_binder", "speller",
+        "selector", "navigator", "express_editor"})
+    processors->Append(New<ConfigValue>(name));
+  config->SetItem("engine/processors", processors);
+  config->SetString("keypad_processor/mode", "auto");
+  config->SetBool("partial_commit/control_digits", true);
+  engine_->ApplySchema(schema);
+
+  Input("nihao");
+  ASSERT_NO_FATAL_FAILURE(Press(XK_1, kControlMask));
+  EXPECT_EQ("你", committed_);
+  EXPECT_EQ("hao", engine_->context()->input());
+  Input("ni");
+  ASSERT_NO_FATAL_FAILURE(Press(XK_KP_4));
+  EXPECT_EQ("ni4", engine_->context()->GetCommitText());
+  EXPECT_FALSE(engine_->context()->HasMenu());
+  ASSERT_NO_FATAL_FAILURE(Press('x'));
+  ASSERT_NO_FATAL_FAILURE(Press(XK_BackSpace));
+  engine_->context()->set_option("zrm", true);
+  EXPECT_EQ("ni4", engine_->context()->GetCommitText());
+  EXPECT_FALSE(engine_->context()->HasMenu());
+  ASSERT_NO_FATAL_FAILURE(Press(XK_Return));
+  EXPECT_EQ("ni4", committed_);
+
+  Input("ni");
+  auto candidate = engine_->context()->GetSelectedCandidate();
+  ASSERT_TRUE(candidate);
+  const string selected = candidate->text();
+  ASSERT_NO_FATAL_FAILURE(Press(XK_1));
+  EXPECT_EQ(selected, committed_);
+  EXPECT_TRUE(engine_->context()->input().empty());
+  UserDbState state;
+  EXPECT_FALSE(Read("ni", selected, &state));
 }
 
 TEST_F(RimeSequentialUserPhraseTest, SharedWriterUsesActiveTranslatorsMode) {

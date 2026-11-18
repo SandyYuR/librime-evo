@@ -374,6 +374,12 @@ bool ScriptTranslator::CollectSelectedPhrase(Context* ctx, DictEntry* entry) {
 bool ScriptTranslator::WritePhrase(Memory* writer,
                                    const DictEntry& entry,
                                    bool learn) {
+  if (writer == this && learn) {
+    CommitEntry commit(this);
+    static_cast<DictEntry&>(commit) = entry;
+    commit.elements.push_back(&entry);
+    return commit.Save();
+  }
   auto write = [&](const DictEntry& canonical) {
     return (!learn || writer->StartSession()) &&
            writer->user_dict()->RecordPhrase(canonical, learn);
@@ -481,7 +487,8 @@ Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
                        vertices.push_back(start_ + next_pos);
                      },
                      [&](SyllabifyTask*, size_t) { vertices.pop_back(); }};
-  task.characters = SplitCharacters(phrase->text());
+  if (syllable_graph_.has_auxiliary)
+    task.characters = SplitCharacters(phrase->text());
   if (syllabify_dfs(&task, 0, phrase->start() - start_)) {
     result.set_vertices(std::move(vertices));
   }
@@ -550,7 +557,8 @@ string ScriptSyllabifier::GetPreeditString(const Phrase& cand) const {
         output.resize(lengths.top());
         lengths.pop();
       }};
-  task.characters = SplitCharacters(cand.text());
+  if (syllable_graph_.has_auxiliary)
+    task.characters = SplitCharacters(cand.text());
   if (syllabify_dfs(&task, 0, cand.start() - start_)) {
     return translator_->FormatPreedit(output);
   } else {

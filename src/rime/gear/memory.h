@@ -37,6 +37,7 @@ class Memory {
  public:
   Memory(const Ticket& ticket);
   virtual ~Memory();
+  void Disconnect();
 
   virtual bool Memorize(const CommitEntry& commit_entry) = 0;
   virtual bool ProcessSegmentOnCommit(CommitEntry& commit_entry,

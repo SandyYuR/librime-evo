@@ -126,17 +126,37 @@ void UserDictEntryIterator::SortAll() {
   index_ = 0;  // called before iteration; previous skip was AUX filtering
   std::stable_sort(cache_.begin(), cache_.end(),
                    [](const an<DictEntry>& a, const an<DictEntry>& b) {
-                     if (a->weight != b->weight)
-                       return a->weight > b->weight;
-                     if (a->manual_position > 0 && b->manual_position > 0) {
-                       if (a->manual_position != b->manual_position)
-                         return a->manual_position < b->manual_position;
-                       if (a->manual_version != b->manual_version)
-                         return a->manual_version > b->manual_version;
-                       return a->text < b->text;
-                     }
-                     return false;
+                     return a->weight > b->weight;
                    });
+  // Reorder tied pins in their own slots. Ordinary entries retain their
+  // stable positions even when they separate pins with the same weight.
+  vector<an<DictEntry>> pins;
+  for (size_t begin = 0; begin < cache_.size();) {
+    size_t end = begin + 1;
+    while (end < cache_.size() && cache_[end]->weight == cache_[begin]->weight)
+      ++end;
+    pins.clear();
+    for (size_t i = begin; i < end; ++i) {
+      if (cache_[i]->manual_position > 0)
+        pins.push_back(cache_[i]);
+    }
+    if (pins.size() > 1) {
+      std::stable_sort(pins.begin(), pins.end(),
+                       [](const an<DictEntry>& a, const an<DictEntry>& b) {
+                         if (a->manual_position != b->manual_position)
+                           return a->manual_position < b->manual_position;
+                         if (a->manual_version != b->manual_version)
+                           return a->manual_version > b->manual_version;
+                         return a->text < b->text;
+                       });
+      size_t next = 0;
+      for (size_t i = begin; i < end; ++i) {
+        if (cache_[i]->manual_position > 0)
+          cache_[i] = std::move(pins[next++]);
+      }
+    }
+    begin = end;
+  }
   while (!exhausted() && !Allows(Peek()))
     ++index_;
 }
@@ -784,12 +804,13 @@ bool UserDictionary::TranslateCodeToString(const Code& code, string* result) {
     return false;
   result->clear();
   for (const SyllableId& syllable_id : code) {
-    string spelling = rev_syllabary_.count(syllable_id)
-                          ? rev_syllabary_[syllable_id]
-                          : (rev_syllabary_[syllable_id] =
-                                 (prism_ && prism_->has_syllabary()
-                                      ? prism_->GetSyllableById(syllable_id)
-                                      : table_->GetSyllableById(syllable_id)));
+    auto [found, inserted] = rev_syllabary_.try_emplace(syllable_id);
+    if (inserted) {
+      found->second = prism_ && prism_->has_syllabary()
+                          ? prism_->GetSyllableById(syllable_id)
+                          : table_->GetSyllableById(syllable_id);
+    }
+    const string& spelling = found->second;
     if (spelling.empty()) {
       LOG(ERROR) << "Error translating syllable_id '" << syllable_id << "'.";
       result->clear();

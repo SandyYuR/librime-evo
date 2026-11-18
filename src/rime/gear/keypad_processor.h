@@ -9,6 +9,7 @@ namespace rime {
 class KeypadProcessor : public Processor {
  public:
   explicit KeypadProcessor(const Ticket& ticket);
+  ~KeypadProcessor() override;
   ProcessResult ProcessKeyEvent(const KeyEvent& key_event) override;
 
  private:
@@ -16,6 +17,7 @@ class KeypadProcessor : public Processor {
   static const char* ModeName(Mode mode);
   Mode mode_ = kSelect;
   bool raw_mode_ = false;
+  connection update_connection_;
 };
 }  // namespace rime
 #endif  // RIME_KEYPAD_PROCESSOR_H_

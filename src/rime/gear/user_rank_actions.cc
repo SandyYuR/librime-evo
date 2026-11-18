@@ -1,6 +1,7 @@
 // Copyright RIME Developers
 // Distributed under the BSD License
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <rime/candidate.h>
 #include <rime/composition.h>
@@ -110,7 +111,7 @@ bool ApplyEditAction(Engine* engine, Context* ctx, EditAction action) {
   }
 
   // 按当前输入覆盖区间计算可见位置，而不是按内部读音编码分组。
-  int local_position = 0;
+  int64_t local_position = 0;
   std::set<string> seen_texts;
   for (size_t i = 0; i <= source; ++i) {
     const auto previous =
@@ -137,9 +138,12 @@ bool ApplyEditAction(Engine* engine, Context* ctx, EditAction action) {
       local_position = state.position;
     } else if (neighbor_pinned) {
       // 当前词尚未手排时，借用相邻固定位置推导插入点。
-      local_position = neighbor_state.position - direction;
+      local_position = int64_t(neighbor_state.position) - direction;
     }
-    if (local_position < 1 || local_position + direction < 1)
+    const int64_t next_position = local_position + direction;
+    if (local_position < 1 ||
+        local_position > std::numeric_limits<int>::max() || next_position < 1 ||
+        next_position > std::numeric_limits<int>::max())
       return true;
   }
 
@@ -147,9 +151,9 @@ bool ApplyEditAction(Engine* engine, Context* ctx, EditAction action) {
   if (reset_manual) {
     committed = write_db->ResetManualPosition(selected_entry);
   } else {
-    committed =
-        write_db->MoveManualOneStep(selected_entry, neighbor_entry,
-                                    local_position, direction, direction != 0);
+    committed = write_db->MoveManualOneStep(selected_entry, neighbor_entry,
+                                            static_cast<int>(local_position),
+                                            direction, direction != 0);
   }
   if (!committed && direction != 0)
     LOG(WARNING) << "UserDB manual move failed: db=" << db->name()
