@@ -1,0 +1,26 @@
+--- a/cmake/BuildLuaJIT.cmake.in
++++ b/cmake/BuildLuaJIT.cmake.in
+@@ -49,7 +49,13 @@
+   file(COPY "@luajit_source@/" DESTINATION "${work}" PATTERN ".git" EXCLUDE)
+   file(WRITE "${work}/.relver" "${release}\n")
+   set(target_flags "@luajit_target_flags@ -fPIC")
+-  set(make_args "BUILDMODE=static" "CC=\"@CMAKE_C_COMPILER@\""
++  set(target_cc "\"@CMAKE_C_COMPILER@\"")
++  if("@ANDROID@")
++    # LuaJIT runs Make outside the NDK CMake toolchain. Supply its target
++    # and sysroot to the target compiler while keeping HOST_CC native.
++    string(APPEND target_cc " --target=@CMAKE_C_COMPILER_TARGET@ --sysroot=\"@CMAKE_SYSROOT@\"")
++  endif()
++  set(make_args "BUILDMODE=static" "CC=${target_cc}"
+                 "HOST_CC=\"@luajit_host_cc@\""
+                 "XCFLAGS=-DLUAJIT_ENABLE_LUA52COMPAT"
+                 "TARGET_AR=\"@CMAKE_AR@\" rcs")
+@@ -74,6 +80,8 @@
+   elseif("@MINGW@")
+     # LuaJIT must detect MSYS/Cygwin itself to select the matching shell syntax.
+     list(APPEND make_args "TARGET_SYS=Windows")
++  elseif("@ANDROID@")
++    list(APPEND make_args "TARGET_SYS=Linux" "TARGET_STRIP=\"@CMAKE_STRIP@\"")
+   elseif("@CMAKE_CROSSCOMPILING@")
+     list(APPEND make_args "TARGET_SYS=@CMAKE_SYSTEM_NAME@")
+   endif()

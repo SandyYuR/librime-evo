@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/SandyYuR/librime-evo",
+  "maintenance_branch": "build/android-engine-variants",
+  "upstream_repository": "https://github.com/amzxyz/librime-evo",
+  "upstream_commit": "5c3de03f996d3f97350c0e4d6370fc720f453c53"
+}

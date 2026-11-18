@@ -1,0 +1,6 @@
+RIME_ENGINE_1 {
+  global:
+    rime_get_api;
+  local:
+    *;
+};

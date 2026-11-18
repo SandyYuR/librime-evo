@@ -15,5 +15,7 @@ node_modules/
 *~
 .*.swp
 .cache/
+__pycache__/
+*.pyc
 *.7z
 .DS_Store
