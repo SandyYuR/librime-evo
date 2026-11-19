@@ -6,9 +6,6 @@ on:
         default: ${{ github.repository }}
         required: false
         type: string
-      rime_plugins:
-        required: false
-        type: string
 
 jobs:
   build:
@@ -30,7 +27,6 @@ jobs:
       CXX: ${{ matrix.cxx_compiler }}
       BOOST_ROOT: ${{ github.workspace }}/deps/boost
       boost_libs: regex
-      RIME_PLUGINS: ${{ inputs.rime_plugins }}
     
     steps:
       - name: Checkout last commit
@@ -41,11 +37,6 @@ jobs:
 
       - name: Install dependency
         run: ./action-install-linux.sh
-
-      - name: Install Rime plugins
-        run: |
-          read -ra plugins <<< "$RIME_PLUGINS"
-          bash ./install-plugins.sh "${plugins[@]}"
 
       - name: Build and test
         run: make test

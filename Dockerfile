@@ -26,7 +26,7 @@ RUN printf '%s\n' "$LUAJIT_RELVER" > plugins/lua/thirdparty/luajit/.relver
 
 RUN bash install-plugins.sh \
   rime/librime-charcode \
-  amzxyz/librime-evo-octagram \
+  lotem/librime-octagram \
   rime/librime-predict
 
 RUN cmake -B build -G Ninja \

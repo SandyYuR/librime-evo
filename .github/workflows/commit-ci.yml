@@ -26,20 +26,18 @@ jobs:
   linux:
     needs: lint
     uses: ./.github/workflows/linux-build.yml
-    with:
-      rime_plugins: amzxyz/librime-evo-octagram rime/librime-predict
 
   macos:
     needs: lint
     uses: ./.github/workflows/macos-build.yml
     with:
-      rime_plugins: amzxyz/librime-evo-octagram rime/librime-predict
+      rime_plugins: lotem/librime-octagram rime/librime-predict
 
   windows:
     needs: lint
     uses: ./.github/workflows/windows-build.yml
     with:
-      rime_plugins: amzxyz/librime-evo-octagram rime/librime-predict
+      rime_plugins: lotem/librime-octagram rime/librime-predict
 
   docker:
     needs: lint
